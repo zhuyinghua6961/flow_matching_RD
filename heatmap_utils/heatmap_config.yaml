@@ -1,0 +1,28 @@
+# 热力图生成配置文件
+
+# ========== 基础参数 ==========
+img_size: 512                      # 图像尺寸
+max_speed: 30.0                    # 最大速度范围 ±30 m/s
+max_range: 200.0                   # 最大距离 0-200 m
+sigma: 10.0                        # 高斯热力图标准差
+
+# ========== 输出配置 ==========
+output:
+  output_dir: "./heatmaps"         # 输出目录
+  prefix: "heatmap"                # 文件名前缀
+  grayscale_only: true             # 只输出灰度图（true/false）
+  save_info: true                  # 是否保存信息文件（txt）
+
+# ========== 输入配置 ==========
+input:
+  prompt_file: null                # prompt文件路径（null表示使用下面的prompts）
+  
+  # 直接在配置文件中定义prompts（如果prompt_file为null）
+  prompts:
+    - "targets=[(25,30),(30,-20)]"
+    - "targets=[(144,30),(52,21)]"
+    - "targets=[(154,25),(132,-21)]"
+    - "targets=[(24,24),(52,25)]"
+    - "targets=[(20,24),(122,25),(50,-15)]"
+    - "targets=[(40,14),(135,-15),(90,23)]"
+
