@@ -1,0 +1,13 @@
+# FastAPI及相关
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.0
+
+# 基础依赖
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# 日志和工具
+python-dotenv==1.0.0
+
