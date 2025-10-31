@@ -190,10 +190,11 @@ tensorboard --logdir ./logs --port 6006
 
 ```bash
 python inference.py \
-  --checkpoint ./checkpoints/best_model.pth \
-  --sim_rd ./test_images/rd001.png \
-  --prompt "radar-RD-map; ... target number = 1, ..." \
-  --output ./results/real_rd001.png
+  --checkpoint ./outputs/checkpoints/best_model.pth \
+  --sim_rd ./dataset/test/sim/rd1601.png \
+  --prompt "radar-RD-map; Turbo rendering; coordinates: top is near, bottom is far, left is negative, right is positive. target number = 1, the first target: distance = 60m,  velocity = -17.90m/s,  SNR = 43.3dB."
+ \
+  --output ./results/real_rd1601.png
 ```
 
 ### 可视化结果

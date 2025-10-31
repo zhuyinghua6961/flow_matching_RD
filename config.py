@@ -50,6 +50,9 @@ class Config:
         self.weight_factor = loss_cfg.get('weight_factor', 50)
         self.loss_threshold = loss_cfg.get('threshold', 0.1)
         self.loss_pool_size = loss_cfg.get('pool_size', 8)
+        self.focal_gamma = loss_cfg.get('focal_gamma', 0.0)
+        self.use_perceptual = loss_cfg.get('use_perceptual', False)
+        self.perceptual_weight = loss_cfg.get('perceptual_weight', 0.1)
         
         # 训练配置
         train_cfg = self._config.get('train', {})
@@ -122,6 +125,10 @@ class Config:
         print(f"  目标权重因子: {self.weight_factor}")
         print(f"  热力图阈值: {self.loss_threshold}")
         print(f"  Max Pool核大小: {self.loss_pool_size}")
+        print(f"  Focal Loss gamma: {self.focal_gamma}")
+        print(f"  使用感知损失: {self.use_perceptual}")
+        if self.use_perceptual:
+            print(f"  感知损失权重: {self.perceptual_weight}")
         
         # 训练配置
         print("\n[训练配置]")

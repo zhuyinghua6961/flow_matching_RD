@@ -148,10 +148,13 @@ class DownBlock(nn.Module):
         if self.attention is not None:
             x = self.attention(x)
         
+        # 保存下采样前的特征（用于skip connection）
+        skip = x
+        
         if self.downsample is not None:
             x = self.downsample(x)
         
-        return x
+        return x, skip
 
 
 class UpBlock(nn.Module):
@@ -285,18 +288,23 @@ class UNet(nn.Module):
         # Encoder（保存skip connections）
         skips = []
         for i, down_block in enumerate(self.down_blocks):
-            h = down_block(h, time_emb)
+            h, skip = down_block(h, time_emb)
             
-            # 添加ControlNet输出
-            if controlnet_outputs is not None and i < len(controlnet_outputs):
-                h = h + controlnet_outputs[i]
+            # 添加ControlNet输出到下采样后的特征（索引+1，因为outputs[0]是conv_in的输出）
+            if controlnet_outputs is not None and (i + 1) < len(controlnet_outputs):
+                h = h + controlnet_outputs[i + 1]
             
-            skips.append(h)
+            # 保存下采样前的skip（用于decoder）
+            skips.append(skip)
         
         # Bottleneck
         h = self.mid_block1(h, time_emb)
         h = self.mid_attn(h)
         h = self.mid_block2(h, time_emb)
+        
+        # 添加ControlNet的middle block输出（最后一个）
+        if controlnet_outputs is not None and len(controlnet_outputs) > 0:
+            h = h + controlnet_outputs[-1]
         
         # Decoder（使用skip connections）
         for up_block in self.up_blocks:

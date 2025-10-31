@@ -5,6 +5,7 @@ import os
 import argparse
 from pathlib import Path
 from tqdm import tqdm
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
@@ -35,10 +36,10 @@ class Trainer:
         self.model = FlowMatchingModel(
             unet_base_channels=64,
             unet_channel_mult=(1, 2, 4, 8),
-            controlnet_base_channels=32,
+            controlnet_base_channels=64,  # 与UNet保持一致
             controlnet_channel_mult=(1, 2, 4, 8),
             num_res_blocks=2,
-            attention_levels=(2, 3),
+            attention_levels=(3,),  # 只在最低分辨率(64×64)使用attention，避免OOM
             dropout=0.0,
             time_emb_dim=256
         ).to(self.device)
@@ -98,6 +99,25 @@ class Trainer:
             split='train'
         )
         
+        # 验证集加载器（如果提供）
+        self.val_loader = None
+        if config.val_data_root:
+            try:
+                self.val_loader = create_dataloader(
+                    data_root=config.val_data_root,
+                    batch_size=config.batch_size,
+                    img_size=config.img_size,
+                    num_workers=config.num_workers,
+                    shuffle=False,
+                    split='val'
+                )
+                print(f"✓ 验证集已加载: {len(self.val_loader)} 批次")
+            except Exception as e:
+                print(f"⚠️  验证集加载失败: {e}")
+                print(f"  将使用训练loss作为早停依据")
+        else:
+            print("⚠️  未配置验证集，将使用训练loss作为早停依据")
+        
         # TensorBoard
         self.writer = SummaryWriter(log_dir=config.log_dir)
         
@@ -149,10 +169,15 @@ class Trainer:
             real_rd = batch['real_rd'].to(self.device)
             prompts = batch['prompt']
             
-            # 生成热力图
+            # 生成热力图（训练时有一定概率不使用精确heatmap，增强泛化性）
             heatmaps = []
             for prompt in prompts:
-                heatmap = self.heatmap_generator(prompt)
+                # 20%的概率使用弱化的或均匀的heatmap，让模型学会从图像本身判断
+                if np.random.random() < 0.2:
+                    # 使用均匀热力图，让模型不依赖heatmap
+                    heatmap = torch.ones(1, self.config.img_size, self.config.img_size) * 0.3
+                else:
+                    heatmap = self.heatmap_generator(prompt)
                 heatmaps.append(heatmap)
             heatmap = torch.stack(heatmaps).to(self.device)
             
@@ -174,7 +199,7 @@ class Trainer:
             
             # 混合精度训练
             if self.scaler:
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     # 前向传播
                     v_pred = self.model(x_t, t, sim_rd, heatmap)
                     
@@ -243,6 +268,64 @@ class Trainer:
         
         return epoch_losses
     
+    def validate_one_epoch(self, epoch):
+        """在验证集上评估一个epoch"""
+        if not hasattr(self, 'val_loader') or self.val_loader is None:
+            return None
+        
+        self.model.eval()
+        
+        val_losses = {
+            'loss': 0.0,
+            'weighted_loss': 0.0,
+            'base_loss': 0.0,
+            'target_loss': 0.0,
+            'bg_loss': 0.0
+        }
+        
+        with torch.no_grad():
+            for batch in tqdm(self.val_loader, desc=f"Validation Epoch {epoch}", leave=False):
+                # 数据移到设备
+                sim_rd = batch['sim_rd'].to(self.device)
+                real_rd = batch['real_rd'].to(self.device)
+                prompts = batch['prompt']
+                
+                # 生成热力图
+                heatmaps = []
+                for prompt in prompts:
+                    heatmap = self.heatmap_generator(prompt)
+                    heatmaps.append(heatmap)
+                heatmap = torch.stack(heatmaps).to(self.device)
+                
+                # Flow Matching前向过程
+                batch_size = sim_rd.shape[0]
+                t = torch.rand(batch_size, device=self.device)
+                
+                # 构造 x_t = (1-t)*x_0 + t*x_1 + noise
+                t_expanded = t.view(-1, 1, 1, 1)
+                noise = torch.randn_like(sim_rd) * self.config.noise_scale
+                x_t = (1 - t_expanded) * sim_rd + t_expanded * real_rd + noise
+                
+                # 速度场目标
+                v_target = real_rd - sim_rd
+                
+                # 前向传播
+                v_pred = self.model(x_t, t, sim_rd, heatmap)
+                
+                # 计算损失
+                loss_dict = self.criterion(v_pred, v_target, heatmap)
+                
+                # 累积损失
+                for key in val_losses.keys():
+                    if key in loss_dict:
+                        val_losses[key] += loss_dict[key].item()
+        
+        # 平均损失
+        for key in val_losses.keys():
+            val_losses[key] /= len(self.val_loader)
+        
+        return val_losses
+    
     def save_checkpoint(self, epoch, loss=None, is_best=False, filename=None):
         """
         保存检查点（按epoch保存）
@@ -310,7 +393,7 @@ class Trainer:
     def load_checkpoint(self, checkpoint_path):
         """加载检查点并恢复训练状态"""
         print(f"加载检查点: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         # 加载模型和优化器
         self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -346,15 +429,25 @@ class Trainer:
             # 训练一个epoch
             epoch_losses = self.train_one_epoch(epoch)
             
+            # 验证一个epoch（如果有验证集）
+            val_losses = self.validate_one_epoch(epoch)
+            
             # 学习率调度
             self.scheduler.step()
             
-            # 当前epoch的监控指标
-            current_loss = epoch_losses['loss']
-            monitor_metric = epoch_losses.get(
-                self.config.early_stop_monitor, 
-                current_loss
-            )
+            # 选择用于早停和保存模型的loss（优先使用验证loss）
+            if val_losses is not None:
+                current_loss = val_losses['loss']
+                monitor_metric = val_losses.get(
+                    self.config.early_stop_monitor, 
+                    current_loss
+                )
+            else:
+                current_loss = epoch_losses['loss']
+                monitor_metric = epoch_losses.get(
+                    self.config.early_stop_monitor, 
+                    current_loss
+                )
             
             # 判断是否为最佳模型
             is_best = current_loss < self.best_loss
@@ -363,10 +456,16 @@ class Trainer:
             
             # 打印epoch统计
             print(f"\nEpoch {epoch}/{self.config.num_epochs} 完成:")
-            print(f"  Loss: {epoch_losses['loss']:.6f}" + 
-                  (f" ⭐ (最佳)" if is_best else ""))
-            print(f"  Target Loss: {epoch_losses['target_loss']:.6f}")
-            print(f"  BG Loss: {epoch_losses['bg_loss']:.6f}")
+            print(f"  [Train] Loss: {epoch_losses['loss']:.6f}, " + 
+                  f"Target: {epoch_losses['target_loss']:.6f}, " +
+                  f"BG: {epoch_losses['bg_loss']:.6f}")
+            if val_losses is not None:
+                print(f"  [Val]   Loss: {val_losses['loss']:.6f} " + 
+                      (f"⭐ (最佳)" if is_best else ""))
+                print(f"          Target: {val_losses['target_loss']:.6f}, " +
+                      f"BG: {val_losses['bg_loss']:.6f}")
+            else:
+                print(f"  " + (f"⭐ (最佳)" if is_best else ""))
             print(f"  LR: {self.optimizer.param_groups[0]['lr']:.6f}")
             
             # 按epoch保存检查点
@@ -386,8 +485,15 @@ class Trainer:
             # 始终保存最新模型
             self.save_checkpoint(epoch, current_loss, is_best=False, filename='latest.pth')
             
-            # 记录最佳loss到TensorBoard
-            self.writer.add_scalar('train/best_loss', self.best_loss, epoch)
+            # 记录到TensorBoard
+            for key, value in epoch_losses.items():
+                self.writer.add_scalar(f'epoch/train_{key}', value, epoch)
+            
+            if val_losses is not None:
+                for key, value in val_losses.items():
+                    self.writer.add_scalar(f'epoch/val_{key}', value, epoch)
+            
+            self.writer.add_scalar('epoch/best_loss', self.best_loss, epoch)
             
             # 早停检查
             if self.early_stopping:

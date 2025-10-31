@@ -53,11 +53,12 @@ class ControlDownBlock(nn.Module):
         if self.attention is not None:
             x = self.attention(x)
         
-        # 保存用于注入UNet的输出
-        output = self.zero_conv(x)
-        
+        # 先下采样
         if self.downsample is not None:
             x = self.downsample(x)
+        
+        # 下采样后再保存输出（与UNet的特征层级对齐）
+        output = self.zero_conv(x)
         
         return x, output
 

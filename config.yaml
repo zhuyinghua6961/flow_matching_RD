@@ -2,28 +2,35 @@
 
 # ========== 数据配置 ==========
 data:
-  data_root: "./data"                # 数据根目录
-  val_data_root: null                # 验证集路径（null表示使用训练集）
-  max_speed: 30.0                    # RD图最大速度范围 ±30 m/s
+  data_root: "./dataset/train"                # 数据根目录
+  val_data_root: "./dataset/val"               # 验证集路径（null表示使用训练集）
+  max_speed: 40.0                    # RD图最大速度范围 ±40 m/s
   max_range: 200.0                   # RD图最大距离 0-200 m
 
 # ========== 热力图配置 ==========
 heatmap:
-  sigma: 10.0                        # 高斯热力图标准差
+  sigma: 8.0                        # 高斯热力图标准差
 
 # ========== Loss配置 ==========
 loss:
-  weight_factor: 50                  # 目标区域权重因子（30-100）
+  weight_factor: 10                  # 目标区域权重因子（降低以关注背景杂波，10-20适合学习背景细节）
   threshold: 0.1                     # 热力图二值化阈值
   pool_size: 8                       # Max Pooling核大小
+  
+  # Focal Loss（可选，用于处理难样本）
+  focal_gamma: 0.0                   # Focal Loss gamma参数（0=关闭，2=标准设置）
+  
+  # Perceptual Loss（可选，用于提升视觉质量）
+  use_perceptual: true               # 是否使用感知损失（建议开启，提升纹理细节）
+  perceptual_weight: 0.05             # 感知损失权重
 
 # ========== 训练配置 ==========
 train:
-  batch_size: 4                      # 批大小
+  batch_size: 2                      # 批大小
   num_epochs: 100                    # 训练轮数
   learning_rate: 0.0001              # 学习率
   num_workers: 4                     # 数据加载进程数
-  gradient_accumulation_steps: 1     # 梯度累积步数（实际batch=batch_size*steps）
+  gradient_accumulation_steps: 8     # 梯度累积步数（实际batch=batch_size*steps）
   
   # 学习率调度
   lr_warmup_epochs: 5                # 预热轮数
@@ -33,10 +40,10 @@ train:
   
   # 设备
   device: "cuda"                     # cuda 或 cpu
-  mixed_precision: true              # 混合精度训练
+  mixed_precision: false              # 混合精度训练
   
   # 保存和日志
-  save_interval: 5                   # 每N个epoch保存检查点
+  save_interval: 10                   # 每N个epoch保存检查点
   log_interval: 50                   # 每N个iteration打印日志
   save_best_only: false              # 是否只保存最佳模型
   keep_last_n_checkpoints: 5         # 保留最近N个检查点（0=全部保留）
@@ -50,14 +57,14 @@ train:
 
 # ========== 推理配置 ==========
 inference:
-  ode_steps: 20                      # ODE求解步数
+  ode_steps: 30                      # ODE求解步数
   ode_method: "euler"                # ODE求解方法：euler 或 rk4
 
 # ========== 路径配置 ==========
 paths:
-  output_dir: "./outputs"            # 输出目录
-  log_dir: "./logs"                  # TensorBoard日志目录
-  checkpoint_dir: "./checkpoints"    # 检查点保存目录
+  output_dir: "./outputs/final"            # 输出目录
+  log_dir: "./outputs/logs"                  # TensorBoard日志目录
+  checkpoint_dir: "./outputs/checkpoints"    # 检查点保存目录
 
 # ========== 恢复训练 ==========
 resume:

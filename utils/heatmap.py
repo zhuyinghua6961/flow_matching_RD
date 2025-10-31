@@ -220,8 +220,8 @@ class HeatmapGenerator:
         if heatmap.max() > 0:
             heatmap = heatmap / heatmap.max()
         
-        # 转换为tensor (1, H, W)
-        heatmap_tensor = torch.from_numpy(heatmap).unsqueeze(0)
+        # 转换为tensor (1, H, W)，并确保是float32
+        heatmap_tensor = torch.from_numpy(heatmap).unsqueeze(0).float()
         
         return heatmap_tensor
     

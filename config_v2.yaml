@@ -1,0 +1,181 @@
+# Flow Matching RD图 Sim2Real V2 配置文件
+# 纯图像对，无需prompt
+
+# ========== 模型配置 ==========
+model:
+  base_channels: 64                     # 基础通道数（32快速验证，64生产环境）
+  channel_mult: [1, 2, 4, 8]            # 通道倍数 [64, 128, 256, 512]（去掉16，减少参数）
+  time_embed_dim: 256                   # 时间嵌入维度
+  num_res_blocks: 2                     # 每层残差块数量
+  attention_levels: []                  # 使用attention的层级（[]关闭，省显存）
+  dropout: 0.0                          # Dropout概率
+
+# ========== 数据配置 ==========
+data:
+  train_root: "./dataset/train"         # 训练集根目录
+  val_root: "./dataset/val"             # 验证集根目录
+  test_root: "./dataset/test"           # 测试集根目录
+  
+  # 数据增强（可选，建议先false）
+  augment: false                        # 是否启用数据增强
+  
+  # 数据标准化
+  normalize_mean: 0.5                   # 归一化均值（标准化到[-1,1]）
+  normalize_std: 0.5                    # 归一化标准差
+
+# ========== Loss配置 ==========
+loss:
+  # Perceptual Loss（关键！用于提升视觉质量和纹理细节）
+  use_perceptual: true                  # 是否使用感知损失（强烈建议开启！）
+  perceptual_weight: 0.01               # 感知损失权重（0.01安全，0.02-0.03效果好，避免NaN）
+  perceptual_interval: 50               # 每N步计算一次感知损失（省时间）
+  perceptual_layers: [3, 8, 15]         # VGG层索引 [relu1_2, relu2_2, relu3_3]
+  
+  # 梯度惩罚（可选，提高稳定性，一般不需要）
+  use_gradient_penalty: false           # 是否使用梯度惩罚
+  gradient_penalty_weight: 0.0          # 梯度惩罚权重
+
+# ========== 训练配置 ==========
+train:
+  batch_size: 1                         # 批大小（512x512图像显存占用大）
+  num_epochs: 100                       # 训练轮数
+  learning_rate: 0.0001                 # 学习率（1e-4，稳定）
+  num_workers: 4                        # 数据加载进程数
+  gradient_accumulation_steps: 16       # 梯度累积步数（实际batch=1*16=16）
+  
+  # 学习率调度
+  lr_scheduler: "cosine"                # 学习率调度器：cosine, step, plateau
+  lr_warmup_epochs: 5                   # 预热轮数
+  lr_min: 1.0e-6                        # 最小学习率（cosine）
+  
+  # 优化器
+  optimizer: "adamw"                    # adamw 或 adam
+  weight_decay: 0.01                    # 权重衰减（AdamW正则化）
+  betas: [0.9, 0.999]                   # Adam beta参数
+  
+  # 梯度裁剪（防止梯度爆炸）
+  max_grad_norm: 1.0                    # 梯度裁剪阈值
+  
+  # 设备
+  device: "cuda"                        # cuda 或 cpu
+  mixed_precision: false                # 混合精度训练（建议先false确保稳定）
+  
+  # 保存和日志
+  save_interval: 10                     # 每N个epoch保存检查点
+  log_interval: 50                      # 每N个iteration打印日志
+  save_best_only: false                 # 是否只保存最佳模型
+  keep_last_n_checkpoints: 5            # 保留最近N个检查点（0=全部保留）
+  
+  # 早停机制
+  early_stopping:
+    enabled: true                       # 是否启用早停
+    patience: 20                        # 容忍N个epoch无改善
+    min_delta: 0.0001                   # 最小改善阈值
+    monitor: "val_loss"                 # 监控指标：val_loss
+
+# ========== 推理配置 ==========
+inference:
+  ode_steps: 50                         # ODE求解步数（越多越精细，推荐30-100）
+  ode_method: "euler"                   # ODE求解方法：euler 或 rk4
+  
+  # 生成参数（调试用）
+  batch_size: 1                         # 推理批大小
+  save_intermediate: false              # 是否保存中间步骤（调试用）
+  intermediate_steps: [10, 20, 30, 40]  # 保存的中间步骤
+
+# ========== 路径配置 ==========
+paths:
+  output_dir: "./outputs_v2/results"        # 输出目录
+  log_dir: "./outputs_v2/logs"              # TensorBoard日志目录
+  checkpoint_dir: "./outputs_v2/checkpoints" # 检查点保存目录
+
+# ========== 恢复训练 ==========
+resume:
+  checkpoint: null                      # 恢复训练的检查点路径（null=从头开始）
+  
+# ========== 其他配置 ==========
+misc:
+  seed: 42                              # 随机种子（可复现）
+  cudnn_benchmark: true                 # 加速训练（固定输入尺寸时）
+  deterministic: false                  # 完全确定性（慢但可复现）
+
+
+# ========================================================================
+# 参数调整建议
+# ========================================================================
+#
+# 【快速验证配置】（1-2小时，验证可行性）
+# model:
+#   base_channels: 32
+# train:
+#   num_epochs: 20
+#   batch_size: 4
+# loss:
+#   perceptual_weight: 0.01
+#
+# 【标准配置】（1-2天，推荐）
+# model:
+#   base_channels: 64
+# train:
+#   num_epochs: 100
+#   batch_size: 4
+#   gradient_accumulation_steps: 4
+# loss:
+#   perceptual_weight: 0.02
+#
+# 【高质量配置】（追求最佳效果）
+# model:
+#   base_channels: 64
+# train:
+#   num_epochs: 200
+#   batch_size: 8
+# loss:
+#   perceptual_weight: 0.03
+# inference:
+#   ode_steps: 100
+#   ode_method: "rk4"
+#
+# ========================================================================
+# 常见问题解决
+# ========================================================================
+#
+# 【训练NaN】
+# - mixed_precision: false
+# - perceptual_weight: 0.01
+# - learning_rate: 0.00005
+#
+# 【显存不足】
+# - batch_size: 2
+# - attention_levels: []  (关闭attention)
+# - base_channels: 32
+#
+# 【生成太模糊】
+# - perceptual_weight: 0.03-0.05  (增大)
+# - ode_steps: 100  (增加步数)
+#
+# 【训练太慢】
+# - mixed_precision: true  (稳定后开启)
+# - perceptual_interval: 20  (降低频率)
+#
+# ========================================================================
+# 关键参数说明
+# ========================================================================
+#
+# perceptual_weight: 最关键的参数！
+#   - 0.01: 安全，训练稳定，不会NaN
+#   - 0.02: 推荐，效果和稳定性平衡
+#   - 0.03-0.05: 追求效果，需要监控NaN
+#   - >0.05: 容易NaN，不推荐
+#
+# ode_steps: 推理质量
+#   - 30: 快速预览
+#   - 50: 标准质量（推荐）
+#   - 100: 高质量
+#
+# base_channels: 模型大小
+#   - 32: 快速验证（参数~5M）
+#   - 64: 标准配置（参数~20M）
+#   - 128: 大模型（参数~80M，一般不需要）
+#
+# ========================================================================
+

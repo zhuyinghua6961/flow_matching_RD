@@ -1,2 +1,5 @@
-*_dataset/
-*output/
+*dataset/
+*output*/
+__pycache__/
+logs/
+checkpoints/
