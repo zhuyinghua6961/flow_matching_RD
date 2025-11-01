@@ -209,10 +209,10 @@ class Trainer:
         elif self.config['train']['lr_scheduler'] == 'plateau':
             self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer,
-                mode='min',
-                factor=0.5,
-                patience=10,
-                verbose=True
+                mode=self.config['train'].get('plateau_mode', 'min'),
+                factor=self.config['train'].get('plateau_factor', 0.5),
+                patience=self.config['train'].get('plateau_patience', 10),
+                min_lr=self.config['train'].get('plateau_min_lr', 1e-6)
             )
         else:
             self.scheduler = None

@@ -39,7 +39,7 @@ async def startup_event():
         plugin_name='flow_matching_v2',
         plugin_class=FlowMatchingV2Plugin,
         config={
-            'checkpoint_path': '/home/user/桌面/flow_matching_RD/outputs_v2/checkpoints/best_model.pth',
+            'checkpoint_path': '/home/user/桌面/flow_matching_RD/outputs_v2/checkpoints/  checkpoint_epoch_49.pth',
             'device': 'cuda:0',
             'base_channels': 64,
             'channel_mult': (1, 2, 4, 8),

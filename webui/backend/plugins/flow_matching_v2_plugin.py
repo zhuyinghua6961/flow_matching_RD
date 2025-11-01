@@ -55,13 +55,18 @@ class FlowMatchingV2Plugin(InferenceInterface):
         self.attention_levels = config.get('attention_levels', ())
         self.image_size = config.get('image_size', (512, 512))
         
+        # 可视化参数
+        self.apply_colormap = config.get('apply_colormap', True)  # 是否应用伪彩色
+        self.colormap_name = config.get('colormap_name', 'jet')   # colormap类型: jet, viridis, hot, etc.
+        
         # 性能指标
         self.metrics = InferenceMetrics()
         
-        # 图像预处理
+        # 图像预处理（与训练时保持一致）
         self.transform = transforms.Compose([
             transforms.Resize(self.image_size),
-            transforms.ToTensor()
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5])  # [0,1] -> [-1,1]
         ])
     
     def load_model(self, checkpoint_path: str, device: str = 'cuda:0') -> bool:
@@ -125,9 +130,21 @@ class FlowMatchingV2Plugin(InferenceInterface):
         output_path: str,
         ode_steps: int = 50,
         ode_method: str = 'euler',
+        apply_colormap: bool = None,
+        colormap: str = None,
         **kwargs
     ) -> Dict[str, Any]:
-        """单张图片推理"""
+        """
+        单张图片推理
+        
+        Args:
+            image_path: 输入图像路径
+            output_path: 输出图像路径
+            ode_steps: ODE求解步数
+            ode_method: ODE求解方法
+            apply_colormap: 是否应用伪彩色（None=使用配置）
+            colormap: colormap名称（如'jet', 'viridis'等，None=使用配置）
+        """
         if not self.is_loaded:
             return {
                 'success': False,
@@ -136,6 +153,11 @@ class FlowMatchingV2Plugin(InferenceInterface):
         
         try:
             start_time = time.time()
+            
+            # 临时修改colormap配置
+            old_colormap = self.colormap_name
+            if colormap is not None:
+                self.colormap_name = colormap
             
             # 加载图像
             image = Image.open(image_path).convert('L')
@@ -149,8 +171,12 @@ class FlowMatchingV2Plugin(InferenceInterface):
             )
             
             # 保存输出图像
-            output_image = self._tensor_to_image(output_tensor[0])
+            output_image = self._tensor_to_image(output_tensor[0], apply_colormap=apply_colormap)
             output_image.save(output_path)
+            
+            # 恢复colormap配置
+            if colormap is not None:
+                self.colormap_name = old_colormap
             
             inference_time = time.time() - start_time
             self.metrics.update(inference_time)
@@ -243,18 +269,27 @@ class FlowMatchingV2Plugin(InferenceInterface):
         info = {
             'name': 'Flow Matching V2',
             'version': '2.0',
-            'description': 'Sim2Real雷达RD图转换模型（无需prompt）',
+            'description': 'Sim2Real雷达RD图转换模型（无需prompt，支持伪彩色可视化）',
             'input_size': self.image_size,
             'output_size': self.image_size,
             'supported_formats': ['.png', '.jpg', '.jpeg', '.bmp'],
             'default_params': {
                 'ode_steps': 50,
-                'ode_method': 'euler'
+                'ode_method': 'euler',
+                'apply_colormap': self.apply_colormap,
+                'colormap': self.colormap_name
             },
             'custom_fields': {
                 'base_channels': self.base_channels,
                 'channel_mult': self.channel_mult,
                 'attention_levels': self.attention_levels
+            },
+            'colormap_options': {
+                'enabled': self.apply_colormap,
+                'current': self.colormap_name,
+                'available': ['jet', 'viridis', 'plasma', 'inferno', 'magma', 
+                             'hot', 'cool', 'spring', 'summer', 'autumn', 'winter',
+                             'gray', 'bone', 'copper', 'turbo']
             }
         }
         
@@ -295,16 +330,49 @@ class FlowMatchingV2Plugin(InferenceInterface):
         
         return x_t
     
-    def _tensor_to_image(self, tensor: torch.Tensor) -> Image.Image:
-        """将tensor转换为PIL Image"""
-        # tensor: (C, H, W), 范围 [0, 1]
+    def _tensor_to_image(self, tensor: torch.Tensor, apply_colormap: bool = None) -> Image.Image:
+        """
+        将tensor转换为PIL Image
+        
+        Args:
+            tensor: (C, H, W), 范围 [-1, 1] (模型输出)
+            apply_colormap: 是否应用伪彩色映射（None=使用配置，用于RD图可视化）
+        """
+        # Denormalize: [-1, 1] -> [0, 1]
+        tensor = (tensor + 1) / 2
         tensor = torch.clamp(tensor, 0, 1)
         array = (tensor.cpu().numpy() * 255).astype(np.uint8)
         
         if array.shape[0] == 1:
             # 灰度图
             array = array[0]
-            return Image.fromarray(array, mode='L')
+            
+            # 确定是否应用colormap
+            if apply_colormap is None:
+                apply_colormap = self.apply_colormap
+            
+            # 应用伪彩色映射（RD图可视化）
+            if apply_colormap:
+                import matplotlib.pyplot as plt
+                import matplotlib.cm as cm
+                
+                # 使用配置的colormap
+                try:
+                    colormap = cm.get_cmap(self.colormap_name)
+                except:
+                    # 如果colormap不存在，使用默认的jet
+                    colormap = cm.get_cmap('jet')
+                    print(f"⚠️  Colormap '{self.colormap_name}' 不存在，使用 'jet'")
+                
+                # 归一化到[0, 1]
+                normalized = array / 255.0
+                # 应用colormap
+                colored = colormap(normalized)
+                # 转换为RGB (去掉alpha通道)
+                colored_rgb = (colored[:, :, :3] * 255).astype(np.uint8)
+                return Image.fromarray(colored_rgb, mode='RGB')
+            else:
+                return Image.fromarray(array, mode='L')
         else:
             # RGB图
             array = array.transpose(1, 2, 0)

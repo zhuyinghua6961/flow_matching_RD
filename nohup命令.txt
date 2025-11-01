@@ -1,0 +1,5 @@
+nohup tensorboard --logdir=logs --port=6006 --bind_all > tensorboard.log 2>&1 &
+nohup python train_v2.py --config config_v2.yaml > train_v2.log 2>&1 &
+查看日志：
+tail -f train_v2.log
+ps aux | grep train_v2.py

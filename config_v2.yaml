@@ -8,20 +8,20 @@ model:
   time_embed_dim: 256                   # 时间嵌入维度
   num_res_blocks: 2                     # 每层残差块数量
   attention_levels: []                  # 使用attention的层级（[]关闭，省显存）
-  dropout: 0.0                          # Dropout概率
+  dropout: 0.1                          # Dropout概率
 
 # ========== 数据配置 ==========
 data:
-  train_root: "./dataset/train"         # 训练集根目录
-  val_root: "./dataset/val"             # 验证集根目录
-  test_root: "./dataset/test"           # 测试集根目录
+  train_root: "./new_dataset/train"         # 训练集根目录
+  val_root: "./new_dataset/val"             # 验证集根目录
+  test_root: "./new_dataset/test"           # 测试集根目录
   
   # 数据增强（可选，建议先false）
-  augment: false                        # 是否启用数据增强
+  augment: true                        # 是否启用数据增强
   
   # 数据标准化
-  normalize_mean: 0.5                   # 归一化均值（标准化到[-1,1]）
-  normalize_std: 0.5                    # 归一化标准差
+  normalize_mean: 0.35                   # 归一化均值（标准化到[-1,1]）
+  normalize_std: 0.06                    # 归一化标准差
 
 # ========== Loss配置 ==========
 loss:
@@ -38,15 +38,19 @@ loss:
 # ========== 训练配置 ==========
 train:
   batch_size: 1                         # 批大小（512x512图像显存占用大）
-  num_epochs: 100                       # 训练轮数
-  learning_rate: 0.0001                 # 学习率（1e-4，稳定）
+  num_epochs: 150                       # 训练轮数
+  learning_rate: 0.00005                 # 学习率（1e-4，稳定）
   num_workers: 4                        # 数据加载进程数
   gradient_accumulation_steps: 16       # 梯度累积步数（实际batch=1*16=16）
   
   # 学习率调度
-  lr_scheduler: "cosine"                # 学习率调度器：cosine, step, plateau
-  lr_warmup_epochs: 5                   # 预热轮数
-  lr_min: 1.0e-6                        # 最小学习率（cosine）
+  lr_scheduler: "plateau"               # 学习率调度器：plateau推荐（小数据集自适应）
+  
+  # ReduceLROnPlateau参数
+  plateau_patience: 10                  # 10轮val_loss不降就减半LR
+  plateau_factor: 0.5                   # LR衰减因子（减半）
+  plateau_min_lr: 1.0e-6                # 最小学习率
+  plateau_mode: "min"                   # 监控val_loss最小值
   
   # 优化器
   optimizer: "adamw"                    # adamw 或 adam
@@ -85,9 +89,9 @@ inference:
 
 # ========== 路径配置 ==========
 paths:
-  output_dir: "./outputs_v2/results"        # 输出目录
-  log_dir: "./outputs_v2/logs"              # TensorBoard日志目录
-  checkpoint_dir: "./outputs_v2/checkpoints" # 检查点保存目录
+  output_dir: "./outputs_v2_new_data/results"        # 输出目录
+  log_dir: "./outputs_v2_new_data/logs"              # TensorBoard日志目录
+  checkpoint_dir: "./outputs_v2_new_data/checkpoints" # 检查点保存目录
 
 # ========== 恢复训练 ==========
 resume:
