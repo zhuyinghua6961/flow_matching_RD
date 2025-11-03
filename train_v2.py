@@ -17,6 +17,7 @@ from tqdm import tqdm
 from models_v2 import Sim2RealFlowModel
 from models_v2.perceptual_loss import PerceptualLoss
 from utils_v2 import RDPairDataset
+from utils_v2.losses import frequency_domain_loss, ssim_loss
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 
@@ -242,6 +243,8 @@ class Trainer:
         total_loss = 0
         total_loss_fm = 0
         total_loss_perceptual = 0
+        total_loss_frequency = 0
+        total_loss_ssim = 0
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config['train']['num_epochs']}")
         
@@ -254,22 +257,39 @@ class Trainer:
                 # Flow Matching Loss
                 loss_fm = self.model.compute_loss(sim_images, real_images)
                 
-                # Perceptual Loss（简化版：直接用真实图和当前ODE中间步骤）
+                # 获取一个预测样本用于结构loss计算
+                # 使用t=0.5时刻的预测作为中间结果（避免完整ODE求解）
+                batch_size = sim_images.shape[0]
+                t_mid = torch.ones(batch_size, device=self.device) * 0.5
+                noise = torch.randn_like(real_images)
+                x_mid = 0.5 * noise + 0.5 * real_images
+                v_pred = self.model(x_mid, t_mid, sim_images)
+                # 简单预测结果
+                predicted = x_mid + v_pred * 0.5
+                
+                # Perceptual Loss（简化版）
                 loss_perceptual = torch.tensor(0.0, device=self.device)
                 if (self.perceptual_criterion is not None and 
                     self.global_step % self.config['loss']['perceptual_interval'] == 0):
-                    # 使用t=0.5时刻的预测作为中间结果（避免完整ODE求解）
-                    batch_size = sim_images.shape[0]
-                    t_mid = torch.ones(batch_size, device=self.device) * 0.5
-                    noise = torch.randn_like(real_images)
-                    x_mid = 0.5 * noise + 0.5 * real_images
-                    v_pred = self.model(x_mid, t_mid, sim_images)
-                    # 简单预测结果
-                    predicted = x_mid + v_pred * 0.5
                     loss_perceptual = self.perceptual_criterion(predicted, real_images)
                 
+                # 频域Loss（学习多普勒结构）
+                loss_freq = torch.tensor(0.0, device=self.device)
+                if self.config['loss'].get('use_frequency', False):
+                    loss_freq = frequency_domain_loss(predicted, real_images)
+                
+                # SSIM Loss（结构相似性）
+                loss_ssim_val = torch.tensor(0.0, device=self.device)
+                if self.config['loss'].get('use_ssim', False):
+                    loss_ssim_val = ssim_loss(predicted, real_images)
+                
                 # 总Loss
-                loss = loss_fm + self.config['loss']['perceptual_weight'] * loss_perceptual
+                loss = (
+                    loss_fm + 
+                    self.config['loss']['perceptual_weight'] * loss_perceptual +
+                    self.config['loss'].get('frequency_weight', 0.1) * loss_freq +
+                    self.config['loss'].get('ssim_weight', 0.3) * loss_ssim_val
+                )
                 loss = loss / self.grad_accum_steps
             
             # 反向传播
@@ -302,6 +322,10 @@ class Trainer:
             total_loss_fm += loss_fm.item()
             if loss_perceptual.item() > 0:
                 total_loss_perceptual += loss_perceptual.item()
+            if loss_freq.item() > 0:
+                total_loss_frequency += loss_freq.item()
+            if loss_ssim_val.item() > 0:
+                total_loss_ssim += loss_ssim_val.item()
             
             # 日志
             if self.global_step % self.config['train']['log_interval'] == 0:
@@ -309,13 +333,23 @@ class Trainer:
                 self.writer.add_scalar('train/loss_fm', loss_fm.item(), self.global_step)
                 if loss_perceptual.item() > 0:
                     self.writer.add_scalar('train/loss_perceptual', loss_perceptual.item(), self.global_step)
+                if loss_freq.item() > 0:
+                    self.writer.add_scalar('train/loss_frequency', loss_freq.item(), self.global_step)
+                if loss_ssim_val.item() > 0:
+                    self.writer.add_scalar('train/loss_ssim', loss_ssim_val.item(), self.global_step)
                 self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
             
-            pbar.set_postfix({
+            postfix_dict = {
                 'loss': f"{loss.item() * self.grad_accum_steps:.4f}",
-                'loss_fm': f"{loss_fm.item():.4f}",
-                'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
-            })
+                'fm': f"{loss_fm.item():.4f}",
+            }
+            if loss_freq.item() > 0:
+                postfix_dict['freq'] = f"{loss_freq.item():.4f}"
+            if loss_ssim_val.item() > 0:
+                postfix_dict['ssim'] = f"{loss_ssim_val.item():.4f}"
+            postfix_dict['lr'] = f"{self.optimizer.param_groups[0]['lr']:.6f}"
+            
+            pbar.set_postfix(postfix_dict)
             
             self.global_step += 1
         
@@ -331,6 +365,8 @@ class Trainer:
         
         total_loss = 0
         total_loss_fm = 0
+        total_loss_frequency = 0
+        total_loss_ssim = 0
         
         for sim_images, real_images, _ in tqdm(self.val_loader, desc="Validation"):
             sim_images = sim_images.to(self.device)
@@ -339,8 +375,37 @@ class Trainer:
             # Flow Matching Loss
             loss_fm = self.model.compute_loss(sim_images, real_images)
             
-            total_loss += loss_fm.item()
+            # 获取预测用于结构loss
+            batch_size = sim_images.shape[0]
+            t_mid = torch.ones(batch_size, device=self.device) * 0.5
+            noise = torch.randn_like(real_images)
+            x_mid = 0.5 * noise + 0.5 * real_images
+            v_pred = self.model(x_mid, t_mid, sim_images)
+            predicted = x_mid + v_pred * 0.5
+            
+            # 频域Loss
+            loss_freq = torch.tensor(0.0, device=self.device)
+            if self.config['loss'].get('use_frequency', False):
+                loss_freq = frequency_domain_loss(predicted, real_images)
+            
+            # SSIM Loss
+            loss_ssim_val = torch.tensor(0.0, device=self.device)
+            if self.config['loss'].get('use_ssim', False):
+                loss_ssim_val = ssim_loss(predicted, real_images)
+            
+            # 总loss（与训练时相同的权重）
+            loss = (
+                loss_fm + 
+                self.config['loss'].get('frequency_weight', 0.1) * loss_freq +
+                self.config['loss'].get('ssim_weight', 0.3) * loss_ssim_val
+            )
+            
+            total_loss += loss.item()
             total_loss_fm += loss_fm.item()
+            if loss_freq.item() > 0:
+                total_loss_frequency += loss_freq.item()
+            if loss_ssim_val.item() > 0:
+                total_loss_ssim += loss_ssim_val.item()
         
         avg_loss = total_loss / len(self.val_loader)
         avg_loss_fm = total_loss_fm / len(self.val_loader)
@@ -348,6 +413,10 @@ class Trainer:
         # 记录
         self.writer.add_scalar('val/loss', avg_loss, epoch)
         self.writer.add_scalar('val/loss_fm', avg_loss_fm, epoch)
+        if total_loss_frequency > 0:
+            self.writer.add_scalar('val/loss_frequency', total_loss_frequency / len(self.val_loader), epoch)
+        if total_loss_ssim > 0:
+            self.writer.add_scalar('val/loss_ssim', total_loss_ssim / len(self.val_loader), epoch)
         
         return avg_loss
     
@@ -439,9 +508,46 @@ class Trainer:
             if self.early_stopping:
                 if self.early_stopping(val_loss):
                     print(f"\n早停触发！最佳Val Loss: {self.best_val_loss:.6f}")
+                    # 保存早停时的最终模型
+                    final_path = self.checkpoint_dir / "final_model.pth"
+                    checkpoint = {
+                        'epoch': epoch,
+                        'global_step': self.global_step,
+                        'model_state_dict': self.model.state_dict(),
+                        'optimizer_state_dict': self.optimizer.state_dict(),
+                        'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                        'best_val_loss': self.best_val_loss,
+                        'config': self.config,
+                        'early_stopped': True
+                    }
+                    if self.scaler:
+                        checkpoint['scaler_state_dict'] = self.scaler.state_dict()
+                    torch.save(checkpoint, final_path)
+                    print(f"保存最终模型（早停）: {final_path}")
                     break
         
+        # 正常训练结束，保存最终模型
+        else:
+            final_path = self.checkpoint_dir / "final_model.pth"
+            checkpoint = {
+                'epoch': self.config['train']['num_epochs'] - 1,
+                'global_step': self.global_step,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.optimizer.state_dict(),
+                'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                'best_val_loss': self.best_val_loss,
+                'config': self.config,
+                'early_stopped': False
+            }
+            if self.scaler:
+                checkpoint['scaler_state_dict'] = self.scaler.state_dict()
+            torch.save(checkpoint, final_path)
+            print(f"\n保存最终模型（训练完成）: {final_path}")
+        
         print("\n训练完成！")
+        print(f"最佳Val Loss: {self.best_val_loss:.6f}")
+        print(f"最佳模型: {self.checkpoint_dir / 'best_model.pth'}")
+        print(f"最终模型: {self.checkpoint_dir / 'final_model.pth'}")
         self.writer.close()
 
 

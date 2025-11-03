@@ -2,9 +2,21 @@
 FastAPI主入口
 """
 import logging
+import os
+import sys
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+
+# 自动定位到项目根目录
+current_dir = Path(__file__).parent.absolute()
+project_root = current_dir.parent.parent  # 从 webui/backend 回到项目根目录
+
+# 如果当前目录是 webui/backend，切换到项目根目录
+if current_dir.name == 'backend' and current_dir.parent.name == 'webui':
+    os.chdir(project_root)
+    print(f"✓ 自动切换工作目录到项目根目录: {project_root}")
 
 from config import (
     CORS_ORIGINS, LOG_LEVEL, LOG_FORMAT,
@@ -81,6 +93,43 @@ async def startup_event():
     logger.info("动态注册模式：请通过前端UI上传并注册插件")
     logger.info("点击右上角的 [插件管理] 按钮开始")
     
+    # ====================================================================
+    # 【方式3】自动扫描trained_models目录（新功能）
+    # ====================================================================
+    logger.info("=" * 70)
+    logger.info("正在扫描trained_models目录...")
+    logger.info(f"当前工作目录: {os.getcwd()}")
+    
+    # 检查必要的路径
+    trained_models_path = os.path.join(os.getcwd(), "trained_models")
+    config_path = os.path.join(os.getcwd(), "config_v2.yaml")
+    
+    logger.info(f"trained_models路径: {trained_models_path}")
+    logger.info(f"trained_models存在: {os.path.exists(trained_models_path)}")
+    logger.info(f"config_v2.yaml存在: {os.path.exists(config_path)}")
+    
+    # 扫描功能将通过API调用，这里保存扫描结果到app.state
+    try:
+        models = model_manager.scan_trained_models(base_dir="trained_models")
+        app.state.scanned_models = models
+        logger.info(f"✓ 扫描完成，发现 {len(models)} 个模型")
+        if models:
+            logger.info("可用模型:")
+            for model in models[:5]:  # 只显示前5个
+                logger.info(f"  - {model['id']} (Epoch: {model['epoch']}, Loss: {model['val_loss']})")
+            if len(models) > 5:
+                logger.info(f"  ... 还有 {len(models) - 5} 个模型")
+        else:
+            logger.warning("⚠ 未找到任何模型！")
+            logger.info("请确保:")
+            logger.info("  1. trained_models/ 目录存在")
+            logger.info("  2. 子目录包含 checkpoints/ 文件夹")
+            logger.info("  3. checkpoints/ 下有 .pth 文件")
+    except Exception as e:
+        logger.error(f"✗ 扫描trained_models目录失败: {e}", exc_info=True)
+        app.state.scanned_models = []
+    
+    logger.info("=" * 70)
     logger.info("服务器启动完成")
 
 
@@ -126,11 +175,13 @@ if __name__ == "__main__":
     import uvicorn
     from config import HOST, PORT
     
+    # 注意：reload=True 会监控文件变化，导致大量 "change detected" 日志
+    # 如果不需要修改代码，建议设置为 False
     uvicorn.run(
         "main:app",
         host=HOST,
         port=PORT,
-        reload=True,  # 开发模式下自动重载
+        reload=False,  # 关闭自动重载，避免干扰
         log_level=LOG_LEVEL.lower()
     )
 

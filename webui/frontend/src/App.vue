@@ -12,12 +12,10 @@
             type="info" 
             plain
             @click="showPluginManager = true"
-            style="margin-right: 15px;"
           >
             <el-icon><Setting /></el-icon>
             插件管理
           </el-button>
-          <ModelSelector />
         </div>
       </div>
     </el-header>
@@ -25,8 +23,11 @@
     <!-- 主内容区域 -->
     <el-container class="main-container">
       <!-- 左侧：上传和配置 -->
-      <el-aside width="400px" class="left-panel">
-        <el-card class="panel-card">
+      <el-aside width="480px" class="left-panel">
+        <!-- 模型选择器 -->
+        <ModelSelector @model-loaded="handleModelLoaded" />
+
+        <el-card class="panel-card" style="margin-top: 20px;">
           <template #header>
             <span><el-icon><Upload /></el-icon> 图片上传</span>
           </template>
@@ -59,6 +60,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { ElNotification } from 'element-plus'
 import ImageUpload from './components/ImageUpload.vue'
 import ResultDisplay from './components/ResultDisplay.vue'
 import ModelSelector from './components/ModelSelector.vue'
@@ -68,6 +70,20 @@ import { useModelStore } from './stores/model'
 
 const modelStore = useModelStore()
 const showPluginManager = ref(false)
+
+// 处理模型加载事件
+function handleModelLoaded(data) {
+  console.log('模型已加载:', data)
+  ElNotification({
+    title: '模型就绪',
+    message: `模型 ${data.modelId} 已成功加载，可以开始推理`,
+    type: 'success',
+    duration: 3000
+  })
+  
+  // 重新加载插件列表以更新状态
+  modelStore.loadPluginList()
+}
 
 onMounted(() => {
   // 初始化：加载插件列表

@@ -5,3 +5,4 @@ logs/
 checkpoints/
 node_modules/
 *upload*/
+*.log

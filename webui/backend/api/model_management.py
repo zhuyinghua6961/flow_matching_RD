@@ -34,6 +34,12 @@ class SwitchPluginRequest(BaseModel):
     plugin_name: str
 
 
+class AutoLoadModelRequest(BaseModel):
+    """自动加载模型请求"""
+    model_id: str
+    device: str = "cuda:0"
+
+
 @router.get("/list")
 async def list_plugins(request: Request):
     """
@@ -354,4 +360,143 @@ async def unregister_plugin(request: Request, plugin_name: str):
     except Exception as e:
         logger.error(f"注销插件失败: {e}")
         raise HTTPException(status_code=500, detail=f"注销失败: {str(e)}")
+
+
+@router.get("/scan")
+async def scan_trained_models(request: Request, base_dir: str = "trained_models"):
+    """
+    扫描trained_models目录，发现所有可用模型
+    
+    Args:
+        base_dir: 基础目录路径
+    
+    Returns:
+        {
+            'success': bool,
+            'models': List[dict],
+            'total': int,
+            'message': str
+        }
+    """
+    model_manager = request.app.state.model_manager
+    
+    try:
+        models = model_manager.scan_trained_models(base_dir=base_dir)
+        
+        # 更新到app.state
+        request.app.state.scanned_models = models
+        
+        logger.info(f"扫描完成，发现 {len(models)} 个模型")
+        
+        return {
+            'success': True,
+            'models': models,
+            'total': len(models),
+            'message': f'扫描完成，发现 {len(models)} 个模型'
+        }
+        
+    except Exception as e:
+        logger.error(f"扫描trained_models失败: {e}")
+        raise HTTPException(status_code=500, detail=f"扫描失败: {str(e)}")
+
+
+@router.post("/auto_load")
+async def auto_load_model(request: Request, req_body: AutoLoadModelRequest):
+    """
+    从扫描结果中自动加载模型
+    
+    Args:
+        model_id: 模型ID（来自扫描结果）
+        device: 设备
+    
+    Returns:
+        {
+            'success': bool,
+            'plugin_name': str,
+            'model_id': str,
+            'message': str
+        }
+    """
+    model_manager = request.app.state.model_manager
+    
+    try:
+        # 获取扫描结果
+        scanned_models = getattr(request.app.state, 'scanned_models', [])
+        
+        # 查找对应的模型
+        model_info = None
+        for model in scanned_models:
+            if model['id'] == req_body.model_id:
+                model_info = model
+                break
+        
+        if model_info is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"模型不存在: {req_body.model_id}。请先调用 /api/models/scan"
+            )
+        
+        # 自动注册插件
+        success = model_manager.auto_register_from_config(
+            model_info=model_info,
+            device=req_body.device
+        )
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="模型注册失败")
+        
+        # 生成插件名称
+        plugin_name = req_body.model_id.replace('/', '_').replace('.pth', '')
+        
+        # 加载模型
+        load_success = model_manager.load_model(
+            plugin_name=plugin_name,
+            device=req_body.device
+        )
+        
+        if not load_success:
+            raise HTTPException(status_code=500, detail="模型加载失败")
+        
+        logger.info(f"自动加载模型成功: {req_body.model_id}")
+        
+        return {
+            'success': True,
+            'plugin_name': plugin_name,
+            'model_id': req_body.model_id,
+            'message': '加载成功'
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"自动加载模型失败: {e}")
+        raise HTTPException(status_code=500, detail=f"加载失败: {str(e)}")
+
+
+@router.get("/scanned")
+async def get_scanned_models(request: Request):
+    """
+    获取已扫描的模型列表（缓存）
+    
+    Returns:
+        {
+            'success': bool,
+            'models': List[dict],
+            'total': int,
+            'message': str
+        }
+    """
+    try:
+        scanned_models = getattr(request.app.state, 'scanned_models', [])
+        
+        return {
+            'success': True,
+            'models': scanned_models,
+            'total': len(scanned_models),
+            'message': '获取成功'
+        }
+        
+    except Exception as e:
+        logger.error(f"获取扫描结果失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
 

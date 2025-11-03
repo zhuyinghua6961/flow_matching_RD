@@ -123,19 +123,21 @@ class RDPairDataset(Dataset):
         数据增强（同时应用于sim和real）
         
         增强方式:
-        - 水平翻转（概率50%）
+        - 垂直翻转（上下翻转，概率50%）
         - 亮度调整（±10%）
         - 对比度调整（±10%）
         
-        注意: 不做旋转和裁剪（RD图有方向性）
+        注意: 
+        - 只做垂直翻转，不做水平翻转（保持距离轴方向一致）
+        - 不做旋转和裁剪（RD图有方向性）
         """
         import random
         from PIL import ImageEnhance
         
-        # 水平翻转
+        # 垂直翻转（上下翻转）
         if random.random() > 0.5:
-            sim_img = sim_img.transpose(Image.FLIP_LEFT_RIGHT)
-            real_img = real_img.transpose(Image.FLIP_LEFT_RIGHT)
+            sim_img = sim_img.transpose(Image.FLIP_TOP_BOTTOM)
+            real_img = real_img.transpose(Image.FLIP_TOP_BOTTOM)
         
         # 亮度调整
         brightness_factor = random.uniform(0.9, 1.1)

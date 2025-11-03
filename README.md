@@ -1,354 +1,152 @@
-# Flow Matching RD图 Sim2Real V2
+# Flow Matching RD图 Sim2Real
 
-**纯图像对的端到端Sim2Real模型 - 无需prompt！**
+**基于Flow Matching的雷达RD图仿真到真实转换模型**
 
----
-
-## 🎯 **核心改进**
-
-### **V1（原模型）vs V2（新模型）**
-
-| 特性 | V1（原模型） | V2（新模型） |
-|------|-------------|------------|
-| **输入** | sim_image + prompt | sim_image only |
-| **网络** | UNet + ControlNet + HeatmapGenerator | SimEncoder + ConditionalUNet |
-| **训练数据** | sim/ + real/ + prompt/ | sim/ + real/ |
-| **推理** | 需要提供目标位置/速度prompt | 直接输入仿真图 |
-| **Loss** | FM + Weighted + Perceptual | FM + Perceptual |
-| **复杂度** | 高 | 中 |
-| **实用性** | 中（需要prompt） | 高（端到端） |
-| **适用场景** | 精细控制、可解释性 | 快速部署、实际应用 |
+端到端的图像到图像转换，无需prompt或标注信息。
 
 ---
 
-## 📊 **模型架构**
+## 📊 模型架构
 
-### **整体流程**
+### 整体流程
 
 ```
-输入: sim_image (仿真图)
+输入: sim_image (仿真RD图, 512×512, 单通道)
   ↓
-SimEncoder(sim_image) → cond_features [多尺度特征]
+SimEncoder → 多尺度条件特征 [64, 128, 256, 512, 1024]
   ↓
-初始化: x_0 ~ N(0, I) [纯噪声]
+初始化: x_0 ~ N(0, I) (随机噪声)
   ↓
-ODE求解: 
-  for t = 0 to 1:
-    v = ConditionalUNet(x_t, t, cond_features)
-    x_{t+dt} = x_t + v * dt
+Flow Matching ODE求解:
+  for t = 0 → 1 (50步):
+    v_t = ConditionalUNet(x_t, t, cond_features)
+    x_{t+1} = x_t + v_t * dt
   ↓
-输出: real_image (生成的真实图)
+输出: real_image (生成的真实RD图, 512×512)
 ```
 
-### **详细架构**
+### 核心组件
 
-#### **1. SimEncoder（特征提取器）**
-- **输入**: (B, 1, 512, 512) - 仿真图
-- **架构**: 4层下采样 + ResBlock
-- **输出**: 多尺度特征 [64, 128, 256, 512, 1024] 通道
-- **作用**: 提取仿真图的结构信息，不受噪声干扰
+#### 1. SimEncoder（条件编码器）
+- **作用**: 提取仿真图的结构和语义特征
+- **架构**: 5层下采样 + ResNet Block
+- **输出**: 多尺度特征金字塔，用于条件注入
+- **参数量**: ~2M
 
-#### **2. ConditionalUNet（去噪网络）**
-- **输入**: 
-  - x_t: (B, 1, 512, 512) - 噪声图
-  - t: (B,) - 时间步 [0, 1]
-  - cond_features: List - SimEncoder的特征
-- **架构**: UNet + 时间嵌入 + 条件注入
-- **条件注入方式**: 逐层相加 `h = h + cond_feature`
-- **输出**: (B, 1, 512, 512) - 预测的速度场
+#### 2. ConditionalUNet（条件去噪网络）
+- **作用**: 在条件特征指导下，从噪声生成真实图
+- **输入**: 噪声图 x_t + 时间步 t + 条件特征
+- **架构**: UNet + Time Embedding + 跨层特征注入
+- **输出**: 预测的速度场 v_t
+- **参数量**: ~62M
 
-#### **3. Flow Matching原理**
-- **训练**: 
+#### 3. Flow Matching
+- **训练**: 学习从噪声到真实图的最优传输路径
+  ```python
+  x_t = (1-t)·noise + t·real_image
+  v_target = real_image - noise
+  loss = MSE(model(x_t, t, sim), v_target)
   ```
-  x_t = (1-t) * noise + t * real_image
-  v_true = real_image - noise
-  v_pred = model(x_t, t, sim_image)
-  Loss = MSE(v_pred, v_true)
-  ```
-- **推理**: ODE求解 `dx/dt = v(x, t, sim_image)`
+- **推理**: ODE求解器沿学到的路径生成图像
+
+**总参数量**: 64M
 
 ---
 
-## 🔧 **Loss函数设计**
+## 🎯 Loss函数设计
 
-### **组合Loss**
-
-```
-Total Loss = Loss_FM + λ * Loss_Perceptual
-
-其中:
-- Loss_FM: Flow Matching Loss (MSE)
-- Loss_Perceptual: VGG特征匹配
-- λ = 0.01 (可调)
-```
-
-### **为什么需要Perceptual Loss？**
-
-| Loss类型 | MSE Only | MSE + Perceptual |
-|---------|----------|------------------|
-| **优点** | 训练快、稳定 | 纹理丰富、视觉质量高 |
-| **缺点** | 输出过于平滑、杂波少 | 训练稍慢 |
-| **适用** | 快速验证 | 实际应用 |
-
-**建议**: 一定要加Perceptual Loss（权重0.01-0.05），解决"太干净"问题！
-
----
-
-## 📁 **数据组织**
-
-### **目录结构**（简化了！）
-
-```
-dataset/
-├── train/              # 训练集
-│   ├── sim/            # 仿真图
-│   │   ├── rd001.png
-│   │   ├── rd002.png
-│   │   └── ...
-│   └── real/           # 真实图
-│       ├── rd001.png
-│       ├── rd002.png
-│       └── ...
-├── val/                # 验证集
-│   ├── sim/
-│   └── real/
-└── test/               # 测试集
-    ├── sim/
-    └── real/
-```
-
-**注意**: 
-- ✅ 不再需要 `prompt/` 目录！
-- ✅ sim和real通过文件名匹配
-- ✅ 图像格式：PNG灰度图
-
----
-
-## 🚀 **快速开始**
-
-### **1. 训练**
-
-```bash
-python train_v2.py --config config_v2.yaml
-```
-
-**训练过程**：
-- 自动保存检查点到 `outputs_v2/checkpoints/`
-- TensorBoard日志: `outputs_v2/logs/`
-- 早停机制自动生效
-- 每10个epoch保存一次
-
-### **2. 推理（单张）**
-
-```bash
-python inference_v2.py \
-    --checkpoint outputs_v2/checkpoints/best_model.pth \
-    --input path/to/sim_image.png \
-    --output path/to/generated.png
-```
-
-### **3. 推理（批量）**
-
-```bash
-python inference_v2.py \
-    --checkpoint outputs_v2/checkpoints/best_model.pth \
-    --input dataset/test/sim/ \
-    --output outputs_v2/results/ \
-    --batch
-```
-
-### **4. 测试（评估指标）**
-
-```bash
-python test_v2.py \
-    --checkpoint outputs_v2/checkpoints/best_model.pth \
-    --save_results \
-    --output_dir outputs_v2/test_results/
-```
-
-**输出指标**：
-- MSE: 均方误差
-- PSNR: 峰值信噪比（dB）
-- SSIM: 结构相似度
-
----
-
-## ⚙️ **关键参数调整**
-
-### **config_v2.yaml 核心参数**
-
-```yaml
-# 模型
-model:
-  base_channels: 64           # 基础通道数（越大越慢但表达能力强）
-  attention_levels: [3]       # 只在64x64用attention（省显存）
-
-# Loss
-loss:
-  use_perceptual: true        # 必须开启！
-  perceptual_weight: 0.01     # 关键参数！0.01-0.05，避免NaN
-  perceptual_interval: 10     # 每10步计算一次（省时间）
-
-# 训练
-train:
-  batch_size: 4               # 批大小
-  gradient_accumulation_steps: 4  # 实际batch=4*4=16
-  learning_rate: 0.0001       # 学习率
-  mixed_precision: false      # 先用false稳定，再试true
-
-# 推理
-inference:
-  ode_steps: 50               # ODE步数（30-100，越多越精细但慢）
-  ode_method: "euler"         # euler快，rk4精确
-```
-
-### **常见问题调整**
-
-| 问题 | 参数调整 |
-|------|---------|
-| **训练NaN** | `mixed_precision: false`, `perceptual_weight: 0.01` |
-| **显存不足** | `batch_size: 2`, `attention_levels: []` (关闭attention) |
-| **生成太模糊** | `perceptual_weight: 0.03-0.05` 增大 |
-| **训练太慢** | `mixed_precision: true`, `perceptual_interval: 20` |
-| **效果不好** | 增加训练数据，训练更多epoch |
-
----
-
-## 📈 **性能优化建议**
-
-### **训练阶段**
-
-1. **第一轮（快速验证）**
-   ```yaml
-   batch_size: 4
-   num_epochs: 20
-   perceptual_weight: 0.01
-   mixed_precision: false
-   ```
-   → 看看能否学到sim→real的映射
-
-2. **第二轮（完整训练）**
-   ```yaml
-   batch_size: 4
-   num_epochs: 100
-   perceptual_weight: 0.02-0.03
-   mixed_precision: false  # 稳定优先
-   ```
-   → 完整训练，追求效果
-
-3. **第三轮（极致优化）**
-   - 数据增强: `augment: true`
-   - 更多数据: 扩充训练集
-   - 调整perceptual_weight找最佳值
-
-### **推理阶段**
+### 组合Loss
 
 ```python
-# 快速推理（实时应用）
-ode_steps: 30
-ode_method: "euler"
-
-# 高质量推理（离线处理）
-ode_steps: 100
-ode_method: "rk4"
+Total Loss = Loss_FM + λ_freq·Loss_Freq + λ_ssim·Loss_SSIM
 ```
 
----
+| Loss类型 | 权重 | 作用 | 原因 |
+|---------|------|------|------|
+| **Flow Matching Loss** | 1.0 | 基础MSE，学习整体映射 | 保证模型基本能力 |
+| **频域Loss** | 2.5 | FFT频谱幅度匹配 | **核心！** 学习多普勒十字、杂波频率特征 |
+| **SSIM Loss** | 0.5 | 结构相似性 | 辅助保持局部结构和纹理 |
 
-## 🔍 **模型测试**
+### 为什么这样设计？
 
-### **验证各模块**
+#### ❌ 不用感知损失（VGG Perceptual Loss）
+- **原因**: VGG基于自然图像训练（ImageNet），无法理解雷达RD图的物理含义
+- **问题**: 会学习自然图像的纹理和边缘，反而干扰雷达特征学习
+- **实验**: 使用VGG后，模型倾向于生成"看起来平滑"的图像，但丢失多普勒十字
 
-```bash
-# 测试SimEncoder
-cd /home/user/桌面/flow_matching_RD
-python models_v2/sim_encoder.py
+#### ✅ 频域Loss（核心）
+- **原因**: 雷达RD图的核心是**多普勒效应**（频域特征）
+  - 多普勒十字：运动目标在频域呈现十字形强响应
+  - 杂波分布：高频成分反映杂波的空间分布
+- **作用**: 直接在频域监督，强制模型学习物理层面的频率结构
+- **实现**: 
+  ```python
+  # FFT变换到频域
+  fft_pred = torch.fft.rfft2(pred, norm='ortho')
+  fft_target = torch.fft.rfft2(target, norm='ortho')
+  
+  # 对数幅度谱（增强低频信息）
+  mag_pred = torch.log(torch.abs(fft_pred) + 1e-8)
+  mag_target = torch.log(torch.abs(fft_target) + 1e-8)
+  
+  # MSE Loss
+  loss = F.mse_loss(mag_pred, mag_target)
+  ```
+- **为什么用对数**: 频谱幅度范围大（1-10000+），对数压缩后更易优化
 
-# 测试ConditionalUNet
-python models_v2/conditional_unet.py
+#### ✅ SSIM Loss（辅助）
+- **原因**: 保证局部结构和纹理的一致性
+- **作用**: 
+  - 像素级MSE关注全局，SSIM关注局部窗口
+  - 捕捉人眼感知的结构相似性
+- **权重**: 0.5（低于频域Loss），避免过度平滑
 
-# 测试完整模型
-python models_v2/flow_matching_v2.py
+### 权重调整策略
 
-# 测试Perceptual Loss
-python models_v2/perceptual_loss.py
-
-# 测试Dataset
-python utils_v2/dataset_v2.py
+```yaml
+# 当前配置（频域主导）
+frequency_weight: 2.5   # 主导训练，学习多普勒特征
+ssim_weight: 0.5        # 辅助，保持结构
+perceptual_weight: 0.0  # 关闭，对雷达图无效
 ```
 
----
+**核心原则**: 
+- 频域Loss权重 > SSIM权重，确保模型**优先学习物理特性**而非视觉纹理
+- 如果多普勒十字不明显，可增大到3.0（极限值）
+- 如果训练不稳定，降低到2.0
 
-## 📊 **与V1的对比**
+### Loss设计的物理意义
 
-### **优势**
+| 特征 | 空域（像素级） | 频域（FFT） |
+|------|--------------|-----------|
+| **多普勒十字** | 不明显，易被忽略 | ✅ 十字形强响应，非常显著 |
+| **杂波分布** | 随机像素值 | ✅ 高频成分特征 |
+| **目标位置** | ✅ 局部像素值 | 频域弥散 |
 
-✅ **更简单**: 去掉了ControlNet和Heatmap生成
-✅ **更快**: 推理速度提升30%
-✅ **更实用**: 不需要准备prompt
-✅ **端到端**: 直接学习sim→real的映射
-✅ **易部署**: 单个模型文件，直接推理
-
-### **劣势**
-
-⚠️ **可控性低**: 无法指定具体目标位置
-⚠️ **黑盒**: 不知道模型关注什么区域
-⚠️ **需要更多数据**: 没有prompt作为额外监督
-
-### **选择建议**
-
-| 场景 | 推荐模型 |
-|------|---------|
-| 研究、可解释性 | V1（有prompt） |
-| 实际部署、快速推理 | V2（无prompt） |
-| 数据少（<500对） | V1 |
-| 数据多（>1000对） | V2 |
-| 需要精细控制 | V1 |
-| 端到端应用 | V2 |
+**结论**: 频域+空域结合，既学习物理特征（频域），又保证空间准确性（SSIM）。
 
 ---
 
-## 🎓 **论文参考**
+## 📚 文档
 
-- Flow Matching: [Flow Matching for Generative Modeling](https://arxiv.org/abs/2210.02747)
-- Perceptual Loss: [Perceptual Losses for Real-Time Style Transfer](https://arxiv.org/abs/1603.08155)
-- Conditional Generation: [ControlNet](https://arxiv.org/abs/2302.05543)
-
----
-
-## 📝 **总结**
-
-**V2模型特点**：
-1. **纯图像对**: 不需要prompt，简化数据准备
-2. **Encoder-Decoder**: SimEncoder提取特征 + ConditionalUNet去噪
-3. **Flow Matching**: 理论保证的生成模型
-4. **Perceptual Loss**: 提升视觉质量和纹理细节
-5. **端到端**: 从仿真到真实的直接映射
-
-**适用场景**：
-- ✅ 有大量sim-real图像对（>1000对）
-- ✅ 推理时无法提供prompt
-- ✅ 需要快速部署的实际应用
-- ✅ 关注生成质量而非可控性
-
-**推荐工作流**：
-```
-1. 准备数据 → dataset/train/sim, real
-2. 训练模型 → python train_v2.py
-3. 监控日志 → tensorboard --logdir outputs_v2/logs
-4. 推理测试 → python inference_v2.py
-5. 评估指标 → python test_v2.py
-```
+详细使用说明请查看：
+- [快速开始指南](docs/QUICKSTART.md) - 训练、推理、WebUI使用
+- [数据准备](docs/DATA_PREPARATION.md) - 数据格式和预处理（如需要）
+- [配置说明](config_v2.yaml) - 完整的配置参数注释
 
 ---
 
-## 📧 **反馈和改进**
+## 📈 核心优势
 
-如有问题或建议，欢迎反馈！
+✅ **物理驱动**: 频域Loss直接约束多普勒效应，而非依赖视觉相似性  
+✅ **端到端**: 无需prompt，直接从仿真到真实的映射学习  
+✅ **快速收敛**: 频域特征梯度明确，训练更高效  
+✅ **通用性强**: 适用于各类雷达RD图Sim2Real任务  
 
-**下一步优化方向**：
-- [ ] 添加GAN判别器（提升真实感）
-- [ ] 多尺度训练（处理不同分辨率）
-- [ ] 注意力可视化（理解模型关注区域）
-- [ ] 模型蒸馏（加速推理）
+---
 
+## 🎓 技术参考
+
+- **Flow Matching**: [Flow Matching for Generative Modeling](https://arxiv.org/abs/2210.02747)
+- **频域Loss**: 受傅里叶变换在信号处理中的应用启发
+- **SSIM**: [Image Quality Assessment: From Error Visibility to Structural Similarity](https://ieeexplore.ieee.org/document/1284395)

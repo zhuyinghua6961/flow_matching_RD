@@ -1,10 +1,10 @@
 # Flow Matching RD图 Sim2Real V2 配置文件
-# 纯图像对，无需prompt
+# 纯图像对，无需prompt，支持频域Loss学习多普勒效应
 
 # ========== 模型配置 ==========
 model:
-  base_channels: 64                     # 基础通道数（32快速验证，64生产环境）
-  channel_mult: [1, 2, 4, 8]            # 通道倍数 [64, 128, 256, 512]（去掉16，减少参数）
+  base_channels: 64                     # 基础通道数（64生产环境）
+  channel_mult: [1, 2, 4, 8]            # 通道倍数 [64, 128, 256, 512]
   time_embed_dim: 256                   # 时间嵌入维度
   num_res_blocks: 2                     # 每层残差块数量
   attention_levels: []                  # 使用attention的层级（[]关闭，省显存）
@@ -16,20 +16,32 @@ data:
   val_root: "./new_dataset/val"             # 验证集根目录
   test_root: "./new_dataset/test"           # 测试集根目录
   
-  # 数据增强（可选，建议先false）
-  augment: true                        # 是否启用数据增强
+  # 图像参数
+  image_size: 512                       # 图像尺寸（512x512）
+  channels: 1                           # 通道数（灰度图）
   
-  # 数据标准化
-  normalize_mean: 0.35                   # 归一化均值（标准化到[-1,1]）
-  normalize_std: 0.06                    # 归一化标准差
+  # 数据增强
+  augment: true                         # 是否启用数据增强
+  
+  # 数据标准化（⚠️ 重要！必须与数据集统计匹配）
+  normalize_mean: 0.35                  # 归一化均值（基于new_dataset统计）
+  normalize_std: 0.06                   # 归一化标准差（基于new_dataset统计）
 
 # ========== Loss配置 ==========
 loss:
-  # Perceptual Loss（关键！用于提升视觉质量和纹理细节）
-  use_perceptual: true                  # 是否使用感知损失（强烈建议开启！）
-  perceptual_weight: 0.01               # 感知损失权重（0.01安全，0.02-0.03效果好，避免NaN）
-  perceptual_interval: 50               # 每N步计算一次感知损失（省时间）
-  perceptual_layers: [3, 8, 15]         # VGG层索引 [relu1_2, relu2_2, relu3_3]
+  # Perceptual Loss（已关闭 - VGG对雷达图效果不好）
+  use_perceptual: false                 # ❌ 关闭感知损失（对雷达图帮助不大）
+  perceptual_weight: 0.01               # 感知损失权重（已停用）
+  perceptual_interval: 50               # 每N步计算一次感知损失（已停用）
+  perceptual_layers: [3, 8, 15]         # VGG层索引（已停用）
+  
+  # 频域Loss（核心！绝对主导训练，学习多普勒十字）⭐⭐⭐⭐⭐
+  use_frequency: true                   # 是否使用频域损失（强烈推荐！）
+  frequency_weight: 2.5                 # ⬆️⬆️ 频域损失权重（2.5，进一步强化多普勒学习）
+  
+  # SSIM Loss（结构相似性损失，辅助作用）⭐⭐⭐
+  use_ssim: true                        # 是否使用SSIM损失（辅助）
+  ssim_weight: 0.5                      # ⬇️ SSIM损失权重（方案A: 0.5，降低权重）
   
   # 梯度惩罚（可选，提高稳定性，一般不需要）
   use_gradient_penalty: false           # 是否使用梯度惩罚
@@ -38,23 +50,23 @@ loss:
 # ========== 训练配置 ==========
 train:
   batch_size: 1                         # 批大小（512x512图像显存占用大）
-  num_epochs: 150                       # 训练轮数
-  learning_rate: 0.00005                 # 学习率（1e-4，稳定）
+  num_epochs: 1000                       # ⬆️ 训练轮数（增加到200，频域loss需要更多轮）
+  learning_rate: 0.00005                # ⬇️ 学习率（方案A: 5e-5，提高稳定性）
   num_workers: 4                        # 数据加载进程数
   gradient_accumulation_steps: 16       # 梯度累积步数（实际batch=1*16=16）
   
-  # 学习率调度
+  # 学习率调度（使用ReduceLROnPlateau自适应调整）
   lr_scheduler: "plateau"               # 学习率调度器：plateau推荐（小数据集自适应）
   
   # ReduceLROnPlateau参数
-  plateau_patience: 10                  # 10轮val_loss不降就减半LR
+  plateau_patience: 20                  # ⬆️ 20轮val_loss不降才减半LR（增加patience）
   plateau_factor: 0.5                   # LR衰减因子（减半）
   plateau_min_lr: 1.0e-6                # 最小学习率
   plateau_mode: "min"                   # 监控val_loss最小值
   
   # 优化器
   optimizer: "adamw"                    # adamw 或 adam
-  weight_decay: 0.01                    # 权重衰减（AdamW正则化）
+  weight_decay: 0.01                    # 权重衰减（AdamW正则化，防过拟合）
   betas: [0.9, 0.999]                   # Adam beta参数
   
   # 梯度裁剪（防止梯度爆炸）
@@ -62,7 +74,7 @@ train:
   
   # 设备
   device: "cuda"                        # cuda 或 cpu
-  mixed_precision: false                # 混合精度训练（建议先false确保稳定）
+  mixed_precision: false                # 混合精度训练（建议false确保稳定）
   
   # 保存和日志
   save_interval: 10                     # 每N个epoch保存检查点
@@ -73,7 +85,7 @@ train:
   # 早停机制
   early_stopping:
     enabled: true                       # 是否启用早停
-    patience: 20                        # 容忍N个epoch无改善
+    patience: 30                        # ⬆️ 容忍N个epoch无改善（方案A: 30，避免过早停止）
     min_delta: 0.0001                   # 最小改善阈值
     monitor: "val_loss"                 # 监控指标：val_loss
 
@@ -89,9 +101,9 @@ inference:
 
 # ========== 路径配置 ==========
 paths:
-  output_dir: "./outputs_v2_new_data/results"        # 输出目录
-  log_dir: "./outputs_v2_new_data/logs"              # TensorBoard日志目录
-  checkpoint_dir: "./outputs_v2_new_data/checkpoints" # 检查点保存目录
+  output_dir: "./outputs_v2_freq_ultra/results"        # 输出目录（方案A: 超强频域主导）
+  log_dir: "./outputs_v2_freq_ultra/logs"              # TensorBoard日志目录
+  checkpoint_dir: "./outputs_v2_freq_ultra/checkpoints" # 检查点保存目录
 
 # ========== 恢复训练 ==========
 resume:
@@ -105,81 +117,151 @@ misc:
 
 
 # ========================================================================
-# 参数调整建议
+# 使用说明 - 方案A：超强频域主导版本
 # ========================================================================
 #
-# 【快速验证配置】（1-2小时，验证可行性）
-# model:
-#   base_channels: 32
-# train:
-#   num_epochs: 20
-#   batch_size: 4
+# 本配置文件针对新数据集（new_dataset，254张图片）优化
+# 
+# 【核心改进 - 方案A】：
+# 1. ✅ 关闭Perceptual Loss - VGG对雷达图效果不好
+# 2. ✅ 频域Loss权重2.0（绝对主导）⭐⭐⭐ - 学习多普勒十字
+# 3. ✅ SSIM Loss权重0.5（辅助）- 降低权重避免干扰
+# 4. ✅ 学习率降低到5e-5 - 提高训练稳定性
+# 5. ✅ Plateau patience增加到30 - 避免过早停止
+# 6. ✅ 训练200轮 - 充分收敛
+#
+# 【预期Loss贡献比例】：
+#   - Frequency Loss: 60-70%（绝对主导）⭐⭐⭐
+#   - SSIM Loss: 20-30%（辅助）
+#   - Flow Matching: 10%（基础）
+#
+# 【改进原因】：
+#   方案1（freq=1.0, ssim=0.8）训练后发现：
+#   - SSIM实际贡献46.5%，超过了Frequency的44%
+#   - 模型在学"结构相似"而不是"频域特征"
+#   - 66轮就早停，Frequency Loss还有0.352（太高）
+#   
+#   方案A通过freq=2.0, ssim=0.5解决：
+#   - Frequency绝对主导（60-70%）
+#   - SSIM只作辅助（20-30%）
+#   - 专注学习多普勒十字的频域特征
+#
+# 训练命令：
+#   python train_v2.py --config config_v2.yaml
+#
+# 监控训练：
+#   tensorboard --logdir=outputs_v2_freq_ultra/logs
+#
+# ========================================================================
+# 参数调整建议（方案A）
+# ========================================================================
+#
+# 【如果多普勒效果还是不明显】
 # loss:
-#   perceptual_weight: 0.01
+#   frequency_weight: 3.0    # ⬆️ 进一步增加频域约束（从2.0 → 3.0）
+#   ssim_weight: 0.3         # ⬇️ 进一步降低SSIM权重（从0.5 → 0.3）
 #
-# 【标准配置】（1-2天，推荐）
-# model:
-#   base_channels: 64
-# train:
-#   num_epochs: 100
-#   batch_size: 4
-#   gradient_accumulation_steps: 4
+# 【如果想完全专注频域（方案B）】
 # loss:
-#   perceptual_weight: 0.02
+#   frequency_weight: 2.5
+#   use_ssim: false          # ❌ 完全关闭SSIM
+#   ssim_weight: 0.0
 #
-# 【高质量配置】（追求最佳效果）
-# model:
-#   base_channels: 64
+# 【如果训练不稳定（loss震荡）】
 # train:
-#   num_epochs: 200
-#   batch_size: 8
+#   learning_rate: 0.00003   # ⬇️ 进一步降低学习率（从5e-5 → 3e-5）
 # loss:
-#   perceptual_weight: 0.03
-# inference:
-#   ode_steps: 100
-#   ode_method: "rk4"
+#   frequency_weight: 1.5    # ⬇️ 降低频域权重
+#   ssim_weight: 0.6         # ⬆️ 稍微提高SSIM权重
+#
+# 【如果过拟合（train好val差）】
+# train:
+#   weight_decay: 0.02       # ⬆️ 增加正则化（从0.01 → 0.02）
+# model:
+#   dropout: 0.15            # ⬆️ 增加dropout（从0.1 → 0.15）
+#
+# 【如果显存不足】
+# train:
+#   batch_size: 1
+#   gradient_accumulation_steps: 32  # 增加梯度累积
+# model:
+#   base_channels: 32        # 降低模型大小（从64 → 32）
 #
 # ========================================================================
-# 常见问题解决
+# 重要指标说明（方案A）
 # ========================================================================
 #
-# 【训练NaN】
-# - mixed_precision: false
-# - perceptual_weight: 0.01
-# - learning_rate: 0.00005
+# TensorBoard中关注的指标：
 #
-# 【显存不足】
-# - batch_size: 2
-# - attention_levels: []  (关闭attention)
-# - base_channels: 32
+# 1. train/loss_frequency    - ⭐⭐⭐ 频域loss（绝对主导，应占60-70%）
+# 2. train/loss_ssim         - ⭐ SSIM loss（辅助，应占20-30%）
+# 3. train/loss_fm           - Flow Matching基础loss（基础，~10%）
+# 4. train/loss_perceptual   - ❌ 已关闭（不再显示）
+# 5. val/loss                - 验证总loss（用于early stopping）
+# 6. val/loss_frequency      - ⭐ 验证频域loss（应降到<0.1）
+# 7. train/lr                - 学习率变化（初始5e-5）
 #
-# 【生成太模糊】
-# - perceptual_weight: 0.03-0.05  (增大)
-# - ode_steps: 100  (增加步数)
-#
-# 【训练太慢】
-# - mixed_precision: true  (稳定后开启)
-# - perceptual_interval: 20  (降低频率)
+# 【健康的训练曲线】：
+#   ✅ Frequency Loss贡献60-70%（绝对主导训练）⭐⭐⭐
+#   ✅ SSIM Loss贡献20-30%（辅助）
+#   ✅ FM Loss贡献~10%（基础）
+#   ✅ val/loss_frequency降到<0.1（之前是0.352太高）
+#   ✅ 所有loss都在稳步下降
+#   ✅ train/val loss差距 < 50%（不过拟合）
+#   ✅ 训练至少100轮以上（不会66轮就早停）
+#   ✅ 10-20轮后推理结果出现多普勒十字轮廓
+#   ✅ 50-80轮后十字清晰可见
+#   ✅ 100-150轮接近真实效果
 #
 # ========================================================================
-# 关键参数说明
+# 训练后模型文件
 # ========================================================================
 #
-# perceptual_weight: 最关键的参数！
-#   - 0.01: 安全，训练稳定，不会NaN
-#   - 0.02: 推荐，效果和稳定性平衡
-#   - 0.03-0.05: 追求效果，需要监控NaN
-#   - >0.05: 容易NaN，不推荐
+# outputs_v2_freq_ultra/checkpoints/
+# ├── best_model.pth           - Val Loss最低的模型（推理用）⭐
+# ├── final_model.pth          - 最后一轮的模型（继续训练用）
+# ├── checkpoint_epoch_N.pth   - 定期保存的检查点
 #
-# ode_steps: 推理质量
-#   - 30: 快速预览
-#   - 50: 标准质量（推荐）
-#   - 100: 高质量
+# 推理使用：
+#   python inference_v2.py \
+#     --checkpoint outputs_v2_freq_ultra/checkpoints/best_model.pth \
+#     --input test.png \
+#     --output result.png
 #
-# base_channels: 模型大小
-#   - 32: 快速验证（参数~5M）
-#   - 64: 标准配置（参数~20M）
-#   - 128: 大模型（参数~80M，一般不需要）
+# ========================================================================
+# 预期训练效果（方案A - 超强频域主导）
+# ========================================================================
+#
+# 数据集：177张训练图，38张验证图，39张测试图
+# 预计时间：约120-150分钟（预计训练100-150轮）
+#
+# 【训练里程碑】：
+#   Epoch 10-20:  开始看到多普勒十字的轮廓
+#   Epoch 30-50:  十字结构明显
+#   Epoch 50-80:  十字清晰，细节丰富
+#   Epoch 80-120: 接近真实效果
+#   Epoch 120+:   达到最佳效果，可能触发early stopping
+#
+# 【Loss贡献比例】：
+#   初期：Frequency 50%, SSIM 25%, FM 25%
+#   中期：Frequency 60-70%, SSIM 20-30%, FM ~10%
+#   后期：Frequency 60-70%, SSIM 20-30%, FM ~10%（稳定）
+#
+# 【关键指标】：
+#   ✅ val/loss_frequency 应降到 <0.1（之前0.352太高）
+#   ✅ val/loss_ssim 应降到 <0.2（之前0.384太高）
+#   ✅ 训练至少100轮（不会66轮就早停）
+#
+# 【最终效果】：
+#   ✅ 清晰的多普勒十字交叉模式（频域特征正确）
+#   ✅ 符合雷达物理特征（频域结构准确）
+#   ✅ 结构相似性辅助（不会主导训练）
+#   ✅ 不再是散乱的点或抽象的模糊图
+#
+# 【与之前对比】：
+#   ❌ Perceptual主导（freq=0.2, ssim=0.3）：120轮仍然很差
+#   ⚠️  方案1（freq=1.0, ssim=0.8）：66轮早停，SSIM反超Frequency
+#   ✅ 方案A（freq=2.0, ssim=0.5）：Frequency绝对主导，专注学习多普勒
 #
 # ========================================================================
 

@@ -49,9 +49,6 @@ class FlowMatchingV2Plugin(InferenceInterface):
     def __init__(self, plugin_name: str, config: Dict[str, Any]):
         super().__init__(plugin_name, config)
         
-        # 设备配置（在load_model之前初始化）
-        self.device = config.get('device', 'cuda:0')
-        
         # 推理参数
         self.base_channels = config.get('base_channels', 64)
         self.channel_mult = config.get('channel_mult', (1, 2, 4, 8))
@@ -79,42 +76,25 @@ class FlowMatchingV2Plugin(InferenceInterface):
     def load_model(self, checkpoint_path: str, device: str = 'cuda:0') -> bool:
         """加载模型"""
         try:
-            print(f"[DEBUG] 开始加载模型...")
-            print(f"[DEBUG] checkpoint_path: {checkpoint_path}")
-            print(f"[DEBUG] device: {device}")
-            print(f"[DEBUG] 配置参数: base_channels={self.base_channels}, channel_mult={self.channel_mult}")
-            
             # 创建模型
             self.model = Sim2RealFlowModel(
                 base_channels=self.base_channels,
                 channel_mult=self.channel_mult,
                 attention_levels=self.attention_levels
             )
-            print(f"[DEBUG] 模型结构创建成功")
             
             # 加载检查点
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-            print(f"[DEBUG] checkpoint文件加载成功，keys: {list(checkpoint.keys())}")
             
             if 'model_state_dict' in checkpoint:
                 self.model.load_state_dict(checkpoint['model_state_dict'])
             else:
                 self.model.load_state_dict(checkpoint)
-            print(f"[DEBUG] 模型权重加载成功")
             
             # 移动到指定设备
             self.device = device
             self.model = self.model.to(device)
             self.model.eval()
-            print(f"[DEBUG] 模型已移动到设备: {device}")
-            
-            # 验证模型在GPU上
-            if device.startswith('cuda'):
-                is_on_gpu = next(self.model.parameters()).is_cuda
-                print(f"[DEBUG] 模型在GPU上: {is_on_gpu}")
-                if torch.cuda.is_available():
-                    gpu_mem = torch.cuda.memory_allocated(0) / 1024**3
-                    print(f"[DEBUG] GPU显存占用: {gpu_mem:.2f} GB")
             
             self.is_loaded = True
             
@@ -125,10 +105,7 @@ class FlowMatchingV2Plugin(InferenceInterface):
             return True
             
         except Exception as e:
-            import traceback
             print(f"❌ 模型加载失败: {e}")
-            print(f"[DEBUG] 详细错误:")
-            traceback.print_exc()
             self.is_loaded = False
             return False
     
@@ -172,11 +149,6 @@ class FlowMatchingV2Plugin(InferenceInterface):
             apply_colormap: 是否应用伪彩色（None=使用配置）
             colormap: colormap名称（如'jet', 'viridis'等，None=使用配置）
         """
-        print(f"[DEBUG] inference 被调用")
-        print(f"[DEBUG] is_loaded: {self.is_loaded}")
-        print(f"[DEBUG] model: {self.model}")
-        print(f"[DEBUG] device: {self.device}")
-        
         if not self.is_loaded:
             return {
                 'success': False,
@@ -186,30 +158,23 @@ class FlowMatchingV2Plugin(InferenceInterface):
         try:
             start_time = time.time()
             
-            print(f"[DEBUG] 开始推理，图片路径: {image_path}")
-            
             # 临时修改colormap配置
             old_colormap = self.colormap_name
             if colormap is not None:
                 self.colormap_name = colormap
             
             # 加载图像
-            print(f"[DEBUG] 加载图像...")
             image = Image.open(image_path).convert('L')
             image_tensor = self.transform(image).unsqueeze(0).to(self.device)
-            print(f"[DEBUG] 图像已加载到设备，shape: {image_tensor.shape}")
             
             # ODE求解生成图像
-            print(f"[DEBUG] 开始ODE求解...")
             output_tensor = self._ode_solver(
                 sim_image=image_tensor,
                 ode_steps=ode_steps,
                 method=ode_method
             )
-            print(f"[DEBUG] ODE求解完成，output shape: {output_tensor.shape}")
             
             # 保存输出图像
-            print(f"[DEBUG] 保存输出图像到: {output_path}")
             output_image = self._tensor_to_image(output_tensor[0], apply_colormap=apply_colormap)
             output_image.save(output_path)
             
@@ -219,8 +184,6 @@ class FlowMatchingV2Plugin(InferenceInterface):
             
             inference_time = time.time() - start_time
             self.metrics.update(inference_time)
-            
-            print(f"[DEBUG] 推理成功，耗时: {inference_time:.2f}s")
             
             return {
                 'success': True,
@@ -236,10 +199,6 @@ class FlowMatchingV2Plugin(InferenceInterface):
             }
             
         except Exception as e:
-            import traceback
-            print(f"[DEBUG] 推理异常: {e}")
-            print(f"[DEBUG] 详细错误:")
-            traceback.print_exc()
             return {
                 'success': False,
                 'message': f'推理失败: {str(e)}'

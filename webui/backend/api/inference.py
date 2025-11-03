@@ -66,7 +66,7 @@ async def upload_image(file: UploadFile = File(...)):
         
         return {
             'success': True,
-            'file_path': str(file_path.relative_to(UPLOAD_DIR.parent)),
+            'file_path': str(file_path),  # 返回绝对路径，避免路径问题
             'file_name': file.filename,
             'file_size': file_size,
             'message': '上传成功'
@@ -118,7 +118,7 @@ async def upload_batch_images(files: List[UploadFile] = File(...)):
             
             results.append({
                 'file_name': file.filename,
-                'file_path': str(file_path.relative_to(UPLOAD_DIR.parent)),
+                'file_path': str(file_path),  # 返回绝对路径
                 'file_size': file_size,
                 'success': True,
                 'message': '上传成功'
@@ -257,7 +257,7 @@ async def list_uploaded_images():
             if file_path.is_file() and file_path.suffix.lower() in ALLOWED_IMAGE_EXTENSIONS:
                 images.append({
                     'file_name': file_path.name,
-                    'file_path': str(file_path.relative_to(UPLOAD_DIR.parent)),
+                    'file_path': str(file_path),  # 返回绝对路径
                     'file_size': file_path.stat().st_size,
                     'modified_time': file_path.stat().st_mtime
                 })
