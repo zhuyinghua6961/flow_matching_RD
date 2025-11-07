@@ -137,7 +137,8 @@ import { ElMessage, ElNotification } from 'element-plus'
 import { Box, Refresh, Loading } from '@element-plus/icons-vue'
 import axios from 'axios'
 
-const API_BASE_URL = 'http://localhost:8000'
+// 使用相对路径，会通过Vite代理转发到后端
+const API_BASE_URL = ''
 
 // 状态
 const models = ref([])

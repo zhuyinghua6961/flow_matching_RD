@@ -1,4 +1,4 @@
-*dataset/
+*dataset*/
 *output*/
 __pycache__/
 logs/
@@ -6,3 +6,4 @@ checkpoints/
 node_modules/
 *upload*/
 *.log
+trained_models/

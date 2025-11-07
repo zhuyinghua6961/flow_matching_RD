@@ -449,9 +449,15 @@ class Trainer:
         # 清理旧检查点
         keep_n = self.config['train']['keep_last_n_checkpoints']
         if keep_n > 0:
-            checkpoints = sorted(self.checkpoint_dir.glob("checkpoint_epoch_*.pth"))
+            # 按epoch数字排序，而不是字符串排序
+            checkpoints = sorted(
+                self.checkpoint_dir.glob("checkpoint_epoch_*.pth"),
+                key=lambda p: int(p.stem.split('_')[-1])  # 提取epoch数字
+            )
+            # 删除旧的，保留最近N个
             for ckpt in checkpoints[:-keep_n]:
                 ckpt.unlink()
+                print(f"删除旧检查点: {ckpt.name}")
     
     def load_checkpoint(self, checkpoint_path):
         """加载检查点"""

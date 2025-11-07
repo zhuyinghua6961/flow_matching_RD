@@ -12,9 +12,9 @@ model:
 
 # ========== 数据配置 ==========
 data:
-  train_root: "./new_dataset/train"         # 训练集根目录
-  val_root: "./new_dataset/val"             # 验证集根目录
-  test_root: "./new_dataset/test"           # 测试集根目录
+  train_root: "./dataset_116/train"         # 训练集根目录
+  val_root: "./dataset_116/val"             # 验证集根目录
+  test_root: "./dataset_116/test"           # 测试集根目录
   
   # 图像参数
   image_size: 512                       # 图像尺寸（512x512）
@@ -24,8 +24,8 @@ data:
   augment: true                         # 是否启用数据增强
   
   # 数据标准化（⚠️ 重要！必须与数据集统计匹配）
-  normalize_mean: 0.35                  # 归一化均值（基于new_dataset统计）
-  normalize_std: 0.06                   # 归一化标准差（基于new_dataset统计）
+  normalize_mean: 0.35              # 归一化均值（基于dataset_116统计，按DataX分组计算）
+  normalize_std: 0.06               # 归一化标准差（基于dataset_116统计，按DataX分组计算）
 
 # ========== Loss配置 ==========
 loss:
@@ -37,7 +37,7 @@ loss:
   
   # 频域Loss（核心！绝对主导训练，学习多普勒十字）⭐⭐⭐⭐⭐
   use_frequency: true                   # 是否使用频域损失（强烈推荐！）
-  frequency_weight: 2.5                 # ⬆️⬆️ 频域损失权重（2.5，进一步强化多普勒学习）
+  frequency_weight: 2.0                 # ⬆️⬆️ 频域损失权重（2.5，进一步强化多普勒学习）
   
   # SSIM Loss（结构相似性损失，辅助作用）⭐⭐⭐
   use_ssim: true                        # 是否使用SSIM损失（辅助）
@@ -50,17 +50,17 @@ loss:
 # ========== 训练配置 ==========
 train:
   batch_size: 1                         # 批大小（512x512图像显存占用大）
-  num_epochs: 1000                       # ⬆️ 训练轮数（增加到200，频域loss需要更多轮）
-  learning_rate: 0.00005                # ⬇️ 学习率（方案A: 5e-5，提高稳定性）
+  num_epochs: 1000                        # 训练轮数（dataset_116: 340对训练数据，250轮足够）
+  learning_rate: 0.0001                  # 学习率（dataset_116: 中等规模数据集，1e-4较合适）
   num_workers: 4                        # 数据加载进程数
-  gradient_accumulation_steps: 16       # 梯度累积步数（实际batch=1*16=16）
+  gradient_accumulation_steps: 16       # 梯度累积步数（实际batch=1*16=16，每epoch约21个iteration）
   
   # 学习率调度（使用ReduceLROnPlateau自适应调整）
-  lr_scheduler: "plateau"               # 学习率调度器：plateau推荐（小数据集自适应）
+  lr_scheduler: "plateau"               # 学习率调度器：plateau推荐（中等数据集自适应）
   
   # ReduceLROnPlateau参数
-  plateau_patience: 20                  # ⬆️ 20轮val_loss不降才减半LR（增加patience）
-  plateau_factor: 0.5                   # LR衰减因子（减半）
+  plateau_patience: 20                  # val_loss不降的容忍轮数（中等数据集，20轮较合适）
+  plateau_factor: 0.7                   # LR衰减因子（每次衰减到70%）
   plateau_min_lr: 1.0e-6                # 最小学习率
   plateau_mode: "min"                   # 监控val_loss最小值
   
@@ -78,14 +78,14 @@ train:
   
   # 保存和日志
   save_interval: 10                     # 每N个epoch保存检查点
-  log_interval: 50                      # 每N个iteration打印日志
+  log_interval: 10                      # 每N个iteration打印日志（每epoch约21个iteration，10较合适）
   save_best_only: false                 # 是否只保存最佳模型
   keep_last_n_checkpoints: 5            # 保留最近N个检查点（0=全部保留）
   
   # 早停机制
   early_stopping:
     enabled: true                       # 是否启用早停
-    patience: 30                        # ⬆️ 容忍N个epoch无改善（方案A: 30，避免过早停止）
+    patience: 25                        # 容忍N个epoch无改善（配合250轮训练，25轮较合适）
     min_delta: 0.0001                   # 最小改善阈值
     monitor: "val_loss"                 # 监控指标：val_loss
 
@@ -101,9 +101,9 @@ inference:
 
 # ========== 路径配置 ==========
 paths:
-  output_dir: "./outputs_v2_freq_ultra/results"        # 输出目录（方案A: 超强频域主导）
-  log_dir: "./outputs_v2_freq_ultra/logs"              # TensorBoard日志目录
-  checkpoint_dir: "./outputs_v2_freq_ultra/checkpoints" # 检查点保存目录
+  output_dir: "./trained_models/outputs_117/results"        # 输出目录（方案A: 超强频域主导）
+  log_dir: "./trained_models/outputs_117/logs"              # TensorBoard日志目录
+  checkpoint_dir: "./trained_models/outputs_117/checkpoints" # 检查点保存目录
 
 # ========== 恢复训练 ==========
 resume:
