@@ -1,7 +1,11 @@
 nohup tensorboard --logdir=logs --port=6006 --bind_all > tensorboard.log 2>&1 &
-nohup python train_v2.py --config config_v2.yaml > train_v2.log 2>&1 &
+nohup python train_v3.py --config config_v2.yaml > train_v3.log 2>&1 &
 查看日志：
 tail -f train_v2.log
 ps aux | grep train_v2.py
 nohup python main.py > back.log 2>&1 &
 nohup npm run dev > front.log 2>&1 &
+nohup python train_finetune.py --config config_finetune.yaml > train_finetune.log 2>&1 &
+
+
+https://mirrors.aliyun.com/pypi/simple/

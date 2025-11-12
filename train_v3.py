@@ -22,12 +22,19 @@ from models_v2.perceptual_loss import PerceptualLoss
 from utils_v2 import RDPairDataset
 from utils_v2.losses import frequency_domain_loss, ssim_loss
 from utils_v3 import ImageQualityMetrics, ModelEvaluator
+from utils_v3.discriminator import DopplerClutterDiscriminator, doppler_clutter_gan_loss
 from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 
 
 class EarlyStopping:
-    """早停机制"""
+    """早停机制
+    
+    对于loss指标（越小越好）：
+    - 如果 score < best_score - min_delta：认为有改善，更新best_score并重置counter
+    - 如果 score >= best_score - min_delta：认为没有改善或改善不足，counter增加
+    - 当counter >= patience时，触发早停
+    """
     def __init__(self, patience=20, min_delta=0.0001, monitor='val_loss'):
         self.patience = patience
         self.min_delta = min_delta
@@ -37,13 +44,22 @@ class EarlyStopping:
         self.early_stop = False
     
     def __call__(self, score):
+        """
+        Args:
+            score: 当前指标值（对于loss，越小越好）
+        Returns:
+            bool: 是否触发早停
+        """
         if self.best_score is None:
+            # 第一个epoch，初始化best_score
             self.best_score = score
         elif score > self.best_score - self.min_delta:
+            # 没有改善或改善不足min_delta（对于loss：score越大表示越差）
             self.counter += 1
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
+            # 有改善（score < best_score - min_delta，对于loss表示降低了至少min_delta）
             self.best_score = score
             self.counter = 0
         
@@ -66,6 +82,12 @@ class TrainerV3:
         # PSNR历史记录（用于确定动态范围）
         self.val_psnr_history = []
         
+        # 判别器（如果启用GAN）
+        self.discriminator = None
+        self.use_gan = self.config.get('gan', {}).get('enabled', False)
+        if self.use_gan:
+            self.setup_discriminator()
+        
         print("="*60)
         print("训练配置 V3:")
         print(f"  模型: Sim2RealFlowModel V2")
@@ -81,6 +103,14 @@ class TrainerV3:
         print(f"  混合精度: {self.config['train']['mixed_precision']}")
         print(f"  感知损失: {self.config['loss']['use_perceptual']} (权重={self.config['loss']['perceptual_weight']})")
         print(f"  自动测试: {self.config['train'].get('auto_test', False)}")
+        if self.use_gan:
+            print(f"  GAN: 启用")
+            gan_cfg = self.config.get('gan', {})
+            print(f"    多普勒权重: {gan_cfg.get('doppler_weight', 0.75)}")
+            print(f"    地杂波权重: {gan_cfg.get('clutter_weight', 0.25)}")
+            print(f"    GAN损失权重: {gan_cfg.get('weights', {}).get('gan', 0.3)}")
+        else:
+            print(f"  GAN: 未启用")
         print("="*60)
     
     def setup_environment(self):
@@ -263,6 +293,38 @@ class TrainerV3:
         # 梯度累积
         self.grad_accum_steps = self.config['train']['gradient_accumulation_steps']
     
+    def setup_discriminator(self):
+        """设置判别器"""
+        gan_cfg = self.config.get('gan', {})
+        
+        # 创建判别器
+        self.discriminator = DopplerClutterDiscriminator(
+            doppler_weight=gan_cfg.get('doppler_weight', 0.75),
+            clutter_weight=gan_cfg.get('clutter_weight', 0.25)
+        ).to(self.device)
+        
+        # 判别器不需要训练（只是特征提取和差别计算）
+        # 或者可以选择性地训练判别器来更好地提取特征
+        if gan_cfg.get('train_discriminator', False):
+            # 如果选择训练判别器，需要优化器
+            self.discriminator_optimizer = torch.optim.Adam(
+                self.discriminator.parameters(),
+                lr=gan_cfg.get('lr_discriminator', 2e-4)
+            )
+        else:
+            # 冻结判别器参数（只用于特征提取）
+            for param in self.discriminator.parameters():
+                param.requires_grad = False
+            # 设置为评估模式（不训练）
+            self.discriminator.eval()
+        
+        print(f"判别器已创建（多普勒权重: {gan_cfg.get('doppler_weight', 0.75)}, "
+              f"地杂波权重: {gan_cfg.get('clutter_weight', 0.25)}）")
+        if gan_cfg.get('train_discriminator', False):
+            print("  判别器将参与训练")
+        else:
+            print("  判别器仅用于特征提取（不训练）")
+    
     def train_one_epoch(self, epoch):
         """训练一个epoch"""
         self.model.train()
@@ -272,6 +334,9 @@ class TrainerV3:
         total_loss_perceptual = 0
         total_loss_frequency = 0
         total_loss_ssim = 0
+        total_loss_gan = 0
+        total_loss_gan_doppler = 0
+        total_loss_gan_clutter = 0
         
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config['train']['num_epochs']}")
         
@@ -308,12 +373,32 @@ class TrainerV3:
                 if self.config['loss'].get('use_ssim', False):
                     loss_ssim_val = ssim_loss(predicted, real_images)
                 
+                # GAN Loss（多普勒+地杂波，如果启用）
+                loss_gan = torch.tensor(0.0, device=self.device)
+                loss_gan_doppler = torch.tensor(0.0, device=self.device)
+                loss_gan_clutter = torch.tensor(0.0, device=self.device)
+                if self.use_gan and self.discriminator is not None:
+                    # 判别器设置为评估模式（如果不需要训练）
+                    if not self.config.get('gan', {}).get('train_discriminator', False):
+                        self.discriminator.eval()
+                    # 计算GAN损失
+                    loss_gan_val, gan_diffs = doppler_clutter_gan_loss(
+                        self.discriminator,
+                        real_images,
+                        predicted
+                    )
+                    loss_gan = loss_gan_val
+                    loss_gan_doppler = gan_diffs['doppler_diff']
+                    loss_gan_clutter = gan_diffs['clutter_diff']
+                
                 # 总Loss
+                gan_weight = self.config.get('gan', {}).get('weights', {}).get('gan', 0.3)
                 loss = (
                     loss_fm + 
                     self.config['loss']['perceptual_weight'] * loss_perceptual +
                     self.config['loss'].get('frequency_weight', 0.1) * loss_freq +
-                    self.config['loss'].get('ssim_weight', 0.3) * loss_ssim_val
+                    self.config['loss'].get('ssim_weight', 0.3) * loss_ssim_val +
+                    gan_weight * loss_gan
                 )
                 loss = loss / self.grad_accum_steps
             
@@ -351,6 +436,10 @@ class TrainerV3:
                 total_loss_frequency += loss_freq.item()
             if loss_ssim_val.item() > 0:
                 total_loss_ssim += loss_ssim_val.item()
+            if loss_gan.item() > 0:
+                total_loss_gan += loss_gan.item()
+                total_loss_gan_doppler += loss_gan_doppler.item()
+                total_loss_gan_clutter += loss_gan_clutter.item()
             
             # 日志
             if self.global_step % self.config['train']['log_interval'] == 0:
@@ -362,6 +451,10 @@ class TrainerV3:
                     self.writer.add_scalar('train/loss_frequency', loss_freq.item(), self.global_step)
                 if loss_ssim_val.item() > 0:
                     self.writer.add_scalar('train/loss_ssim', loss_ssim_val.item(), self.global_step)
+                if loss_gan.item() > 0:
+                    self.writer.add_scalar('train/loss_gan', loss_gan.item(), self.global_step)
+                    self.writer.add_scalar('train/loss_gan_doppler', loss_gan_doppler.item(), self.global_step)
+                    self.writer.add_scalar('train/loss_gan_clutter', loss_gan_clutter.item(), self.global_step)
                 self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
             
             postfix_dict = {
@@ -372,6 +465,9 @@ class TrainerV3:
                 postfix_dict['freq'] = f"{loss_freq.item():.4f}"
             if loss_ssim_val.item() > 0:
                 postfix_dict['ssim'] = f"{loss_ssim_val.item():.4f}"
+            if loss_gan.item() > 0:
+                postfix_dict['gan'] = f"{loss_gan.item():.4f}"
+                postfix_dict['gan_d'] = f"{loss_gan_doppler.item():.4f}"
             postfix_dict['lr'] = f"{self.optimizer.param_groups[0]['lr']:.6f}"
             
             pbar.set_postfix(postfix_dict)
@@ -392,6 +488,9 @@ class TrainerV3:
         total_loss_fm = 0
         total_loss_frequency = 0
         total_loss_ssim = 0
+        total_loss_gan = 0
+        total_loss_gan_doppler = 0
+        total_loss_gan_clutter = 0
         
         # 用于收集PSNR
         psnr_values = []
@@ -429,11 +528,29 @@ class TrainerV3:
             if self.config['loss'].get('use_ssim', False):
                 loss_ssim_val = ssim_loss(predicted, real_images)
             
+            # GAN Loss（验证时也计算，但不反向传播）
+            loss_gan = torch.tensor(0.0, device=self.device)
+            loss_gan_doppler = torch.tensor(0.0, device=self.device)
+            loss_gan_clutter = torch.tensor(0.0, device=self.device)
+            if self.use_gan and self.discriminator is not None:
+                self.discriminator.eval()  # 设置为评估模式
+                with torch.no_grad():
+                    loss_gan_val, gan_diffs = doppler_clutter_gan_loss(
+                        self.discriminator,
+                        real_images,
+                        predicted
+                    )
+                    loss_gan = loss_gan_val
+                    loss_gan_doppler = gan_diffs['doppler_diff']
+                    loss_gan_clutter = gan_diffs['clutter_diff']
+            
             # 总loss
+            gan_weight = self.config.get('gan', {}).get('weights', {}).get('gan', 0.3)
             loss = (
                 loss_fm + 
                 self.config['loss'].get('frequency_weight', 0.1) * loss_freq +
-                self.config['loss'].get('ssim_weight', 0.3) * loss_ssim_val
+                self.config['loss'].get('ssim_weight', 0.3) * loss_ssim_val +
+                gan_weight * loss_gan
             )
             
             total_loss += loss.item()
@@ -442,6 +559,10 @@ class TrainerV3:
                 total_loss_frequency += loss_freq.item()
             if loss_ssim_val.item() > 0:
                 total_loss_ssim += loss_ssim_val.item()
+            if loss_gan.item() > 0:
+                total_loss_gan += loss_gan.item()
+                total_loss_gan_doppler += loss_gan_doppler.item()
+                total_loss_gan_clutter += loss_gan_clutter.item()
         
         # 记录PSNR历史
         if psnr_values:
@@ -459,6 +580,10 @@ class TrainerV3:
             self.writer.add_scalar('val/loss_frequency', total_loss_frequency / len(self.val_loader), epoch)
         if total_loss_ssim > 0:
             self.writer.add_scalar('val/loss_ssim', total_loss_ssim / len(self.val_loader), epoch)
+        if total_loss_gan > 0:
+            self.writer.add_scalar('val/loss_gan', total_loss_gan / len(self.val_loader), epoch)
+            self.writer.add_scalar('val/loss_gan_doppler', total_loss_gan_doppler / len(self.val_loader), epoch)
+            self.writer.add_scalar('val/loss_gan_clutter', total_loss_gan_clutter / len(self.val_loader), epoch)
         
         return avg_loss
     
@@ -581,6 +706,12 @@ class TrainerV3:
             'psnr_range': psnr_range  # 保存PSNR范围
         }
         
+        # 保存判别器（如果启用）
+        if self.use_gan and self.discriminator is not None:
+            checkpoint['discriminator_state_dict'] = self.discriminator.state_dict()
+            if hasattr(self, 'discriminator_optimizer'):
+                checkpoint['discriminator_optimizer_state_dict'] = self.discriminator_optimizer.state_dict()
+        
         if self.scaler:
             checkpoint['scaler_state_dict'] = self.scaler.state_dict()
         
@@ -620,6 +751,14 @@ class TrainerV3:
         self.global_step = checkpoint['global_step']
         self.best_val_loss = checkpoint['best_val_loss']
         
+        # 加载判别器（如果启用且检查点中有）
+        if self.use_gan and self.discriminator is not None:
+            if 'discriminator_state_dict' in checkpoint:
+                self.discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
+                print("判别器状态已加载")
+            if hasattr(self, 'discriminator_optimizer') and 'discriminator_optimizer_state_dict' in checkpoint:
+                self.discriminator_optimizer.load_state_dict(checkpoint['discriminator_optimizer_state_dict'])
+        
         # 加载PSNR历史（如果有）
         if 'psnr_range' in checkpoint:
             # 可以从PSNR范围推断历史（不完美，但可以使用）
@@ -654,55 +793,125 @@ class TrainerV3:
                 else:
                     self.scheduler.step()
             
-            # 保存检查点
+            # 检查是否为最佳模型
             is_best = val_loss < self.best_val_loss
             if is_best:
                 self.best_val_loss = val_loss
+                # 问题1修复：立即保存最佳模型，不依赖save_interval
+                self.save_checkpoint(epoch, is_best=True)
+                print(f"  ✓ 新的最佳模型！Val Loss: {self.best_val_loss:.6f}")
             
+            # 定期保存检查点（非最佳模型时）
             if (epoch + 1) % self.config['train']['save_interval'] == 0:
-                self.save_checkpoint(epoch, is_best)
+                if not is_best:  # 如果不是最佳模型，才保存定期检查点
+                    self.save_checkpoint(epoch, is_best=False)
             
             # 早停
             if self.early_stopping:
                 if self.early_stopping(val_loss):
                     print(f"\n早停触发！最佳Val Loss: {self.best_val_loss:.6f}")
-                    # 保存早停时的最终模型
-                    final_path = self.checkpoint_dir / "final_model.pth"
-                    checkpoint = {
-                        'epoch': epoch,
-                        'global_step': self.global_step,
-                        'model_state_dict': self.model.state_dict(),
-                        'optimizer_state_dict': self.optimizer.state_dict(),
-                        'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-                        'best_val_loss': self.best_val_loss,
-                        'config': self.config,
-                        'early_stopped': True,
-                        'psnr_range': self.calculate_psnr_range()
-                    }
-                    if self.scaler:
-                        checkpoint['scaler_state_dict'] = self.scaler.state_dict()
-                    torch.save(checkpoint, final_path)
-                    print(f"保存最终模型（早停）: {final_path}")
+                    # 问题2修复：早停时确保最佳模型已保存，然后保存最终模型
+                    best_model_path = self.checkpoint_dir / "best_model.pth"
+                    if best_model_path.exists():
+                        print(f"  最佳模型已保存在: {best_model_path}")
+                        # 加载最佳模型的状态用于保存final_model
+                        best_checkpoint = torch.load(best_model_path, map_location=self.device, weights_only=False)
+                        # 保存早停时的最终模型（使用最佳模型的状态）
+                        final_path = self.checkpoint_dir / "final_model.pth"
+                        final_checkpoint = {
+                            'epoch': best_checkpoint['epoch'],  # 使用最佳模型的epoch
+                            'global_step': best_checkpoint['global_step'],
+                            'model_state_dict': best_checkpoint['model_state_dict'],  # 使用最佳模型的权重
+                            'optimizer_state_dict': best_checkpoint['optimizer_state_dict'],
+                            'scheduler_state_dict': best_checkpoint['scheduler_state_dict'],
+                            'best_val_loss': self.best_val_loss,
+                            'config': self.config,
+                            'early_stopped': True,
+                            'psnr_range': best_checkpoint.get('psnr_range', self.calculate_psnr_range())
+                        }
+                        # 保存判别器（如果启用）
+                        if self.use_gan and self.discriminator is not None:
+                            if 'discriminator_state_dict' in best_checkpoint:
+                                final_checkpoint['discriminator_state_dict'] = best_checkpoint['discriminator_state_dict']
+                            if hasattr(self, 'discriminator_optimizer') and 'discriminator_optimizer_state_dict' in best_checkpoint:
+                                final_checkpoint['discriminator_optimizer_state_dict'] = best_checkpoint['discriminator_optimizer_state_dict']
+                        if self.scaler and 'scaler_state_dict' in best_checkpoint:
+                            final_checkpoint['scaler_state_dict'] = best_checkpoint['scaler_state_dict']
+                        torch.save(final_checkpoint, final_path)
+                        print(f"  保存最终模型（早停，使用最佳模型权重）: {final_path}")
+                    else:
+                        # 如果最佳模型文件不存在（理论上不应该发生），保存当前模型
+                        print(f"  警告：最佳模型文件不存在，保存当前模型作为最终模型")
+                        final_path = self.checkpoint_dir / "final_model.pth"
+                        checkpoint = {
+                            'epoch': epoch,
+                            'global_step': self.global_step,
+                            'model_state_dict': self.model.state_dict(),
+                            'optimizer_state_dict': self.optimizer.state_dict(),
+                            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                            'best_val_loss': self.best_val_loss,
+                            'config': self.config,
+                            'early_stopped': True,
+                            'psnr_range': self.calculate_psnr_range()
+                        }
+                        if self.scaler:
+                            checkpoint['scaler_state_dict'] = self.scaler.state_dict()
+                        torch.save(checkpoint, final_path)
+                        print(f"  保存最终模型（早停）: {final_path}")
                     break
         
         # 正常训练结束，保存最终模型
         else:
+            # 问题2修复：正常训练结束时，也使用最佳模型作为最终模型
             final_path = self.checkpoint_dir / "final_model.pth"
-            checkpoint = {
-                'epoch': self.config['train']['num_epochs'] - 1,
-                'global_step': self.global_step,
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-                'best_val_loss': self.best_val_loss,
-                'config': self.config,
-                'early_stopped': False,
-                'psnr_range': self.calculate_psnr_range()
-            }
-            if self.scaler:
-                checkpoint['scaler_state_dict'] = self.scaler.state_dict()
-            torch.save(checkpoint, final_path)
-            print(f"\n保存最终模型（训练完成）: {final_path}")
+            best_model_path = self.checkpoint_dir / "best_model.pth"
+            if best_model_path.exists():
+                print(f"\n训练完成，加载最佳模型作为最终模型...")
+                best_checkpoint = torch.load(best_model_path, map_location=self.device, weights_only=False)
+                final_checkpoint = {
+                    'epoch': best_checkpoint['epoch'],
+                    'global_step': best_checkpoint['global_step'],
+                    'model_state_dict': best_checkpoint['model_state_dict'],
+                    'optimizer_state_dict': best_checkpoint['optimizer_state_dict'],
+                    'scheduler_state_dict': best_checkpoint['scheduler_state_dict'],
+                    'best_val_loss': self.best_val_loss,
+                    'config': self.config,
+                    'early_stopped': False,
+                    'psnr_range': best_checkpoint.get('psnr_range', self.calculate_psnr_range())
+                }
+                # 保存判别器（如果启用）
+                if self.use_gan and self.discriminator is not None:
+                    if 'discriminator_state_dict' in best_checkpoint:
+                        final_checkpoint['discriminator_state_dict'] = best_checkpoint['discriminator_state_dict']
+                    if hasattr(self, 'discriminator_optimizer') and 'discriminator_optimizer_state_dict' in best_checkpoint:
+                        final_checkpoint['discriminator_optimizer_state_dict'] = best_checkpoint['discriminator_optimizer_state_dict']
+                if self.scaler and 'scaler_state_dict' in best_checkpoint:
+                    final_checkpoint['scaler_state_dict'] = best_checkpoint['scaler_state_dict']
+                torch.save(final_checkpoint, final_path)
+                print(f"保存最终模型（训练完成，使用最佳模型权重）: {final_path}")
+            else:
+                # 如果最佳模型文件不存在（理论上不应该发生），保存当前模型
+                print(f"警告：最佳模型文件不存在，保存当前模型作为最终模型")
+                checkpoint = {
+                    'epoch': self.config['train']['num_epochs'] - 1,
+                    'global_step': self.global_step,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                    'best_val_loss': self.best_val_loss,
+                    'config': self.config,
+                    'early_stopped': False,
+                    'psnr_range': self.calculate_psnr_range()
+                }
+                # 保存判别器（如果启用）
+                if self.use_gan and self.discriminator is not None:
+                    checkpoint['discriminator_state_dict'] = self.discriminator.state_dict()
+                    if hasattr(self, 'discriminator_optimizer'):
+                        checkpoint['discriminator_optimizer_state_dict'] = self.discriminator_optimizer.state_dict()
+                if self.scaler:
+                    checkpoint['scaler_state_dict'] = self.scaler.state_dict()
+                torch.save(checkpoint, final_path)
+                print(f"保存最终模型（训练完成）: {final_path}")
         
         print("\n训练完成！")
         print(f"最佳Val Loss: {self.best_val_loss:.6f}")

@@ -23,7 +23,13 @@ import torchvision.transforms as transforms
 
 
 class EarlyStopping:
-    """早停机制"""
+    """早停机制
+    
+    对于loss指标（越小越好）：
+    - 如果 score < best_score - min_delta：认为有改善，更新best_score并重置counter
+    - 如果 score >= best_score - min_delta：认为没有改善或改善不足，counter增加
+    - 当counter >= patience时，触发早停
+    """
     def __init__(self, patience=20, min_delta=0.0001, monitor='val_loss'):
         self.patience = patience
         self.min_delta = min_delta
@@ -33,13 +39,22 @@ class EarlyStopping:
         self.early_stop = False
     
     def __call__(self, score):
+        """
+        Args:
+            score: 当前指标值（对于loss，越小越好）
+        Returns:
+            bool: 是否触发早停
+        """
         if self.best_score is None:
+            # 第一个epoch，初始化best_score
             self.best_score = score
         elif score > self.best_score - self.min_delta:
+            # 没有改善或改善不足min_delta（对于loss：score越大表示越差）
             self.counter += 1
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
+            # 有改善（score < best_score - min_delta，对于loss表示降低了至少min_delta）
             self.best_score = score
             self.counter = 0
         
@@ -502,53 +517,104 @@ class Trainer:
                 else:
                     self.scheduler.step()
             
-            # 保存检查点
+            # 检查是否为最佳模型
             is_best = val_loss < self.best_val_loss
             if is_best:
                 self.best_val_loss = val_loss
+                # 问题1修复：立即保存最佳模型，不依赖save_interval
+                self.save_checkpoint(epoch, is_best=True)
+                print(f"  ✓ 新的最佳模型！Val Loss: {self.best_val_loss:.6f}")
             
+            # 定期保存检查点（非最佳模型时）
             if (epoch + 1) % self.config['train']['save_interval'] == 0:
-                self.save_checkpoint(epoch, is_best)
+                if not is_best:  # 如果不是最佳模型，才保存定期检查点
+                    self.save_checkpoint(epoch, is_best=False)
             
             # 早停
             if self.early_stopping:
                 if self.early_stopping(val_loss):
                     print(f"\n早停触发！最佳Val Loss: {self.best_val_loss:.6f}")
-                    # 保存早停时的最终模型
-                    final_path = self.checkpoint_dir / "final_model.pth"
-                    checkpoint = {
-                        'epoch': epoch,
-                        'global_step': self.global_step,
-                        'model_state_dict': self.model.state_dict(),
-                        'optimizer_state_dict': self.optimizer.state_dict(),
-                        'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-                        'best_val_loss': self.best_val_loss,
-                        'config': self.config,
-                        'early_stopped': True
-                    }
-                    if self.scaler:
-                        checkpoint['scaler_state_dict'] = self.scaler.state_dict()
-                    torch.save(checkpoint, final_path)
-                    print(f"保存最终模型（早停）: {final_path}")
+                    # 问题2修复：早停时确保最佳模型已保存，然后保存最终模型
+                    best_model_path = self.checkpoint_dir / "best_model.pth"
+                    if best_model_path.exists():
+                        print(f"  最佳模型已保存在: {best_model_path}")
+                        # 加载最佳模型的状态用于保存final_model
+                        best_checkpoint = torch.load(best_model_path, map_location=self.device, weights_only=False)
+                        # 保存早停时的最终模型（使用最佳模型的状态）
+                        final_path = self.checkpoint_dir / "final_model.pth"
+                        final_checkpoint = {
+                            'epoch': best_checkpoint['epoch'],  # 使用最佳模型的epoch
+                            'global_step': best_checkpoint['global_step'],
+                            'model_state_dict': best_checkpoint['model_state_dict'],  # 使用最佳模型的权重
+                            'optimizer_state_dict': best_checkpoint['optimizer_state_dict'],
+                            'scheduler_state_dict': best_checkpoint['scheduler_state_dict'],
+                            'best_val_loss': self.best_val_loss,
+                            'config': self.config,
+                            'early_stopped': True
+                        }
+                        if self.scaler and 'scaler_state_dict' in best_checkpoint:
+                            final_checkpoint['scaler_state_dict'] = best_checkpoint['scaler_state_dict']
+                        torch.save(final_checkpoint, final_path)
+                        print(f"  保存最终模型（早停，使用最佳模型权重）: {final_path}")
+                    else:
+                        # 如果最佳模型文件不存在（理论上不应该发生），保存当前模型
+                        print(f"  警告：最佳模型文件不存在，保存当前模型作为最终模型")
+                        final_path = self.checkpoint_dir / "final_model.pth"
+                        checkpoint = {
+                            'epoch': epoch,
+                            'global_step': self.global_step,
+                            'model_state_dict': self.model.state_dict(),
+                            'optimizer_state_dict': self.optimizer.state_dict(),
+                            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                            'best_val_loss': self.best_val_loss,
+                            'config': self.config,
+                            'early_stopped': True
+                        }
+                        if self.scaler:
+                            checkpoint['scaler_state_dict'] = self.scaler.state_dict()
+                        torch.save(checkpoint, final_path)
+                        print(f"  保存最终模型（早停）: {final_path}")
                     break
         
         # 正常训练结束，保存最终模型
         else:
+            # 问题2修复：正常训练结束时，也使用最佳模型作为最终模型
             final_path = self.checkpoint_dir / "final_model.pth"
-            checkpoint = {
-                'epoch': self.config['train']['num_epochs'] - 1,
-                'global_step': self.global_step,
-                'model_state_dict': self.model.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
-                'best_val_loss': self.best_val_loss,
-                'config': self.config,
-                'early_stopped': False
-            }
-            if self.scaler:
-                checkpoint['scaler_state_dict'] = self.scaler.state_dict()
-            torch.save(checkpoint, final_path)
-            print(f"\n保存最终模型（训练完成）: {final_path}")
+            best_model_path = self.checkpoint_dir / "best_model.pth"
+            if best_model_path.exists():
+                print(f"\n训练完成，加载最佳模型作为最终模型...")
+                best_checkpoint = torch.load(best_model_path, map_location=self.device, weights_only=False)
+                final_checkpoint = {
+                    'epoch': best_checkpoint['epoch'],
+                    'global_step': best_checkpoint['global_step'],
+                    'model_state_dict': best_checkpoint['model_state_dict'],
+                    'optimizer_state_dict': best_checkpoint['optimizer_state_dict'],
+                    'scheduler_state_dict': best_checkpoint['scheduler_state_dict'],
+                    'best_val_loss': self.best_val_loss,
+                    'config': self.config,
+                    'early_stopped': False
+                }
+                if self.scaler and 'scaler_state_dict' in best_checkpoint:
+                    final_checkpoint['scaler_state_dict'] = best_checkpoint['scaler_state_dict']
+                torch.save(final_checkpoint, final_path)
+                print(f"保存最终模型（训练完成，使用最佳模型权重）: {final_path}")
+            else:
+                # 如果最佳模型文件不存在（理论上不应该发生），保存当前模型
+                print(f"警告：最佳模型文件不存在，保存当前模型作为最终模型")
+                checkpoint = {
+                    'epoch': self.config['train']['num_epochs'] - 1,
+                    'global_step': self.global_step,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
+                    'best_val_loss': self.best_val_loss,
+                    'config': self.config,
+                    'early_stopped': False
+                }
+                if self.scaler:
+                    checkpoint['scaler_state_dict'] = self.scaler.state_dict()
+                torch.save(checkpoint, final_path)
+                print(f"保存最终模型（训练完成）: {final_path}")
         
         print("\n训练完成！")
         print(f"最佳Val Loss: {self.best_val_loss:.6f}")

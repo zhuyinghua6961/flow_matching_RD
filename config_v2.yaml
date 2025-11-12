@@ -12,9 +12,9 @@ model:
 
 # ========== 数据配置 ==========
 data:
-  train_root: "./dataset_116/train"         # 训练集根目录
-  val_root: "./dataset_116/val"             # 验证集根目录
-  test_root: "./dataset_116/test"           # 测试集根目录
+  train_root: "./new_dataset/train"         # 训练集根目录
+  val_root: "./new_dataset/val"             # 验证集根目录
+  test_root: "./new_dataset/test"           # 测试集根目录
   
   # 图像参数
   image_size: 512                       # 图像尺寸（512x512）
@@ -47,19 +47,35 @@ loss:
   use_gradient_penalty: false           # 是否使用梯度惩罚
   gradient_penalty_weight: 0.0          # 梯度惩罚权重
 
+# ========== GAN配置（V3版本） ==========
+gan:
+  enabled: true                        # 是否启用GAN（V3版本功能）
+  
+  # 判别器权重（多普勒为主，地杂波为辅）
+  doppler_weight: 0.75                  # 多普勒效应权重（主要）⭐⭐⭐
+  clutter_weight: 0.25                  # 地杂波权重（次要）
+  
+  # 损失权重
+  weights:
+    gan: 0.3                            # GAN损失权重（较小，作为辅助）
+  
+  # 训练设置
+  train_discriminator: false            # 是否训练判别器（false=只用于特征提取）
+  lr_discriminator: 2e-4                # 判别器学习率（如果训练）
+
 # ========== 训练配置 ==========
 train:
   batch_size: 1                         # 批大小（512x512图像显存占用大）
-  num_epochs: 1000                        # 训练轮数（dataset_116: 340对训练数据，250轮足够）
-  learning_rate: 0.0001                  # 学习率（dataset_116: 中等规模数据集，1e-4较合适）
+  num_epochs: 1000                        # 训练轮数（保持较高，让早停决定实际轮数）
+  learning_rate: 0.00005                 # ⬇️ 学习率降低，适应小数据集
   num_workers: 4                        # 数据加载进程数
-  gradient_accumulation_steps: 16       # 梯度累积步数（实际batch=1*16=16，每epoch约21个iteration）
+  gradient_accumulation_steps: 16       # 梯度累积步数（保持不变）
   
   # 学习率调度（使用ReduceLROnPlateau自适应调整）
   lr_scheduler: "plateau"               # 学习率调度器：plateau推荐（中等数据集自适应）
   
   # ReduceLROnPlateau参数
-  plateau_patience: 20                  # val_loss不降的容忍轮数（中等数据集，20轮较合适）
+  plateau_patience: 20                  # ⬇️ 适当降低容忍轮数
   plateau_factor: 0.7                   # LR衰减因子（每次衰减到70%）
   plateau_min_lr: 1.0e-6                # 最小学习率
   plateau_mode: "min"                   # 监控val_loss最小值
@@ -85,13 +101,13 @@ train:
   # 早停机制
   early_stopping:
     enabled: true                       # 是否启用早停
-    patience: 25                        # 容忍N个epoch无改善（配合250轮训练，25轮较合适）
+    patience: 25                        # ⬇️ 降低容忍N个epoch无改善
     min_delta: 0.0001                   # 最小改善阈值
     monitor: "val_loss"                 # 监控指标：val_loss
 
 # ========== 推理配置 ==========
 inference:
-  ode_steps: 50                         # ODE求解步数（越多越精细，推荐30-100）
+  ode_steps: 30                         # ODE求解步数（越多越精细，推荐30-100）
   ode_method: "euler"                   # ODE求解方法：euler 或 rk4
   
   # 生成参数（调试用）
@@ -101,9 +117,9 @@ inference:
 
 # ========== 路径配置 ==========
 paths:
-  output_dir: "./trained_models/outputs_117/results"        # 输出目录（方案A: 超强频域主导）
-  log_dir: "./trained_models/outputs_117/logs"              # TensorBoard日志目录
-  checkpoint_dir: "./trained_models/outputs_117/checkpoints" # 检查点保存目录
+  output_dir: "./trained_models/outputs1110/results"        # 输出目录（方案A: 超强频域主导）
+  log_dir: "./trained_models/outputs1110/logs"              # TensorBoard日志目录
+  checkpoint_dir: "./trained_models/outputs1110/checkpoints" # 检查点保存目录
 
 # ========== 恢复训练 ==========
 resume:
