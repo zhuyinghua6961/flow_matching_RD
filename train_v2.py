@@ -142,7 +142,7 @@ class Trainer:
             self.perceptual_criterion = None
         
         # 恢复训练
-        self.start_epoch = 0
+        self.start_epoch = 1  # 🔧 统一：epoch从1开始
         self.global_step = 0
         self.best_val_loss = float('inf')
         
@@ -495,7 +495,8 @@ class Trainer:
         """主训练循环"""
         print("\n开始训练...")
         
-        for epoch in range(self.start_epoch, self.config['train']['num_epochs']):
+        # 🔧 统一：确保训练完整的num_epochs个epoch（从1到num_epochs）
+        for epoch in range(self.start_epoch, self.config['train']['num_epochs'] + 1):
             # 训练
             train_loss, train_loss_fm = self.train_one_epoch(epoch)
             

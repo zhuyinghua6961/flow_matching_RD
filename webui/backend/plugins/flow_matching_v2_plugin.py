@@ -79,10 +79,7 @@ class FlowMatchingV2Plugin(InferenceInterface):
     def load_model(self, checkpoint_path: str, device: str = 'cuda:0') -> bool:
         """加载模型"""
         try:
-            print(f"[DEBUG] 开始加载模型...")
-            print(f"[DEBUG] checkpoint_path: {checkpoint_path}")
-            print(f"[DEBUG] device: {device}")
-            print(f"[DEBUG] 配置参数: base_channels={self.base_channels}, channel_mult={self.channel_mult}")
+            print(f"[DEBUG] 开始加载模型: {checkpoint_path}")
             
             # 创建模型
             self.model = Sim2RealFlowModel(
@@ -90,11 +87,9 @@ class FlowMatchingV2Plugin(InferenceInterface):
                 channel_mult=self.channel_mult,
                 attention_levels=self.attention_levels
             )
-            print(f"[DEBUG] 模型结构创建成功")
             
             # 加载检查点
             checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-            print(f"[DEBUG] checkpoint文件加载成功，keys: {list(checkpoint.keys())}")
             
             if 'model_state_dict' in checkpoint:
                 self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -106,21 +101,14 @@ class FlowMatchingV2Plugin(InferenceInterface):
             self.device = device
             self.model = self.model.to(device)
             self.model.eval()
-            print(f"[DEBUG] 模型已移动到设备: {device}")
-            
-            # 验证模型在GPU上
-            if device.startswith('cuda'):
-                is_on_gpu = next(self.model.parameters()).is_cuda
-                print(f"[DEBUG] 模型在GPU上: {is_on_gpu}")
-                if torch.cuda.is_available():
-                    gpu_mem = torch.cuda.memory_allocated(0) / 1024**3
-                    print(f"[DEBUG] GPU显存占用: {gpu_mem:.2f} GB")
-            
             self.is_loaded = True
             
-            print(f"✅ 模型加载成功: {checkpoint_path}")
-            print(f"   设备: {device}")
-            print(f"   参数量: {sum(p.numel() for p in self.model.parameters()):,}")
+            # 输出模型的一些关键参数作为验证
+            first_param = next(iter(self.model.parameters()))
+            param_sum = first_param.sum().item()
+            
+            print(f"✅ 模型加载成功: {self.plugin_name}")
+            print(f"   参数校验和: {param_sum:.6f}, 参数量: {sum(p.numel() for p in self.model.parameters()):,}")
             
             return True
             
@@ -173,9 +161,21 @@ class FlowMatchingV2Plugin(InferenceInterface):
             colormap: colormap名称（如'jet', 'viridis'等，None=使用配置）
         """
         print(f"[DEBUG] inference 被调用")
+        print(f"[DEBUG] 插件名称: {self.plugin_name}")
+        print(f"[DEBUG] 检查点路径: {self.config.get('checkpoint_path', 'Unknown')}")
         print(f"[DEBUG] is_loaded: {self.is_loaded}")
-        print(f"[DEBUG] model: {self.model}")
         print(f"[DEBUG] device: {self.device}")
+        
+        # 输出模型的一些关键参数来验证是否是不同的模型
+        if self.model is not None:
+            try:
+                # 获取第一层的权重作为模型标识
+                first_param = next(iter(self.model.parameters()))
+                param_sum = first_param.sum().item()
+                print(f"[DEBUG] 模型参数校验和: {param_sum:.6f}")
+                print(f"[DEBUG] 模型参数形状: {first_param.shape}")
+            except:
+                print(f"[DEBUG] 无法获取模型参数信息")
         
         if not self.is_loaded:
             return {
@@ -186,30 +186,30 @@ class FlowMatchingV2Plugin(InferenceInterface):
         try:
             start_time = time.time()
             
-            print(f"[DEBUG] 开始推理，图片路径: {image_path}")
+            print(f"[DEBUG] 开始推理: {image_path}")
             
             # 临时修改colormap配置
             old_colormap = self.colormap_name
             if colormap is not None:
                 self.colormap_name = colormap
             
-            # 加载图像
-            print(f"[DEBUG] 加载图像...")
+            # 加载并预处理图像
             image = Image.open(image_path).convert('L')
             image_tensor = self.transform(image).unsqueeze(0).to(self.device)
-            print(f"[DEBUG] 图像已加载到设备，shape: {image_tensor.shape}")
             
             # ODE求解生成图像
-            print(f"[DEBUG] 开始ODE求解...")
             output_tensor = self._ode_solver(
                 sim_image=image_tensor,
                 ode_steps=ode_steps,
                 method=ode_method
             )
-            print(f"[DEBUG] ODE求解完成，output shape: {output_tensor.shape}")
+            
+            # 添加输出统计信息用于验证
+            output_mean = output_tensor.mean().item()
+            output_std = output_tensor.std().item()
+            print(f"[DEBUG] 输出统计: 均值={output_mean:.6f}, 标准差={output_std:.6f}")
             
             # 保存输出图像
-            print(f"[DEBUG] 保存输出图像到: {output_path}")
             output_image = self._tensor_to_image(output_tensor[0], apply_colormap=apply_colormap)
             output_image.save(output_path)
             

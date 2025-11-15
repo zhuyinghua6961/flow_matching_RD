@@ -371,6 +371,12 @@ class ModelManager:
         else:
             plugin = self.get_plugin(plugin_name)
         
+        # 添加调试信息
+        logger.info(f"[INFERENCE] 当前插件: {self.current_plugin}")
+        logger.info(f"[INFERENCE] 请求插件: {plugin_name}")
+        logger.info(f"[INFERENCE] 已注册插件: {list(self.plugins.keys())}")
+        logger.info(f"[INFERENCE] 插件实例: {plugin}")
+        
         if plugin is None:
             return {
                 'success': False,
@@ -382,6 +388,10 @@ class ModelManager:
                 'success': False,
                 'message': f'插件 {plugin_name} 模型未加载'
             }
+        
+        # 添加模型信息调试
+        if hasattr(plugin, 'config') and 'checkpoint_path' in plugin.config:
+            logger.info(f"[INFERENCE] 使用模型: {plugin.config['checkpoint_path']}")
         
         try:
             return plugin.inference(image_path, output_path, **kwargs)
@@ -667,16 +677,52 @@ class ModelManager:
                 plugin_config['ode_steps'] = 50
                 plugin_config['ode_method'] = 'euler'
             
-            # 加载插件类
-            plugin_name = model_id.replace('/', '_').replace('.pth', '')
+            # 生成插件名称（使用完整的model_id确保唯一性）
+            # 使用模型文件的完整路径来生成唯一的插件名称
+            import hashlib
+            model_path = model_info['path']
+            path_hash = hashlib.md5(model_path.encode()).hexdigest()[:8]
+            plugin_name = f"{model_id.replace('/', '_').replace('.pth', '')}_{path_hash}"
+            logger.info(f"[AUTO_REGISTER] 模型ID: {model_id}")
+            logger.info(f"[AUTO_REGISTER] 模型路径: {model_path}")
+            logger.info(f"[AUTO_REGISTER] 插件名称: {plugin_name}")
             
-            # 使用通用的FlowMatchingV2Plugin
-            success = self.load_plugin_from_file(
-                plugin_file=plugin_template_path,
-                plugin_class_name='FlowMatchingV2Plugin',
-                plugin_name=plugin_name,
-                config=plugin_config
-            )
+            # 检查插件是否已存在
+            if plugin_name in self.plugins:
+                logger.info(f"插件 {plugin_name} 已存在，检查是否需要更新模型")
+                existing_plugin = self.plugins[plugin_name]
+                
+                # 检查检查点路径是否改变
+                old_checkpoint = existing_plugin.config.get('checkpoint_path')
+                new_checkpoint = plugin_config.get('checkpoint_path')
+                
+                logger.info(f"[AUTO_REGISTER] 旧检查点: {old_checkpoint}")
+                logger.info(f"[AUTO_REGISTER] 新检查点: {new_checkpoint}")
+                
+                if old_checkpoint != new_checkpoint:
+                    logger.info(f"检查点路径改变，需要重新加载模型")
+                    # 如果模型已加载，先卸载
+                    if existing_plugin.is_loaded:
+                        logger.info(f"卸载旧模型: {old_checkpoint}")
+                        existing_plugin.unload_model()
+                    
+                    # 更新配置
+                    existing_plugin.config.update(plugin_config)
+                    logger.info(f"[AUTO_REGISTER] 配置已更新，模型将在load_model时重新加载")
+                else:
+                    logger.info(f"检查点路径相同，无需重新加载模型")
+                    # 即使路径相同，也更新其他配置
+                    existing_plugin.config.update(plugin_config)
+                
+                success = True
+            else:
+                # 注册新插件
+                success = self.load_plugin_from_file(
+                    plugin_file=plugin_template_path,
+                    plugin_class_name='FlowMatchingV2Plugin',
+                    plugin_name=plugin_name,
+                    config=plugin_config
+                )
             
             if success:
                 logger.info(f"自动注册模型成功: {model_id}")

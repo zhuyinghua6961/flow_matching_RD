@@ -21,7 +21,7 @@ data:
   channels: 1                           # 通道数（灰度图）
   
   # 数据增强
-  augment: true                         # 是否启用数据增强
+  augment: false                         # 是否启用数据增强
   
   # 数据标准化（⚠️ 重要！必须与数据集统计匹配）
   normalize_mean: 0.35              # 归一化均值（基于dataset_116统计，按DataX分组计算）
@@ -37,7 +37,7 @@ loss:
   
   # 频域Loss（核心！绝对主导训练，学习多普勒十字）⭐⭐⭐⭐⭐
   use_frequency: true                   # 是否使用频域损失（强烈推荐！）
-  frequency_weight: 2.0                 # ⬆️⬆️ 频域损失权重（2.5，进一步强化多普勒学习）
+  frequency_weight: 3.0                 # ⬆️⬆️ 频域损失权重（2.5，进一步强化多普勒学习）
   
   # SSIM Loss（结构相似性损失，辅助作用）⭐⭐⭐
   use_ssim: true                        # 是否使用SSIM损失（辅助）
@@ -49,7 +49,7 @@ loss:
 
 # ========== GAN配置（V3版本） ==========
 gan:
-  enabled: true                        # 是否启用GAN（V3版本功能）
+  enabled: false                        # 是否启用GAN（V3版本功能）
   
   # 判别器权重（多普勒为主，地杂波为辅）
   doppler_weight: 0.75                  # 多普勒效应权重（主要）⭐⭐⭐
@@ -107,7 +107,7 @@ train:
 
 # ========== 推理配置 ==========
 inference:
-  ode_steps: 30                         # ODE求解步数（越多越精细，推荐30-100）
+  ode_steps: 50                         # ODE求解步数（越多越精细，推荐30-100）
   ode_method: "euler"                   # ODE求解方法：euler 或 rk4
   
   # 生成参数（调试用）
@@ -117,9 +117,9 @@ inference:
 
 # ========== 路径配置 ==========
 paths:
-  output_dir: "./trained_models/outputs1110/results"        # 输出目录（方案A: 超强频域主导）
-  log_dir: "./trained_models/outputs1110/logs"              # TensorBoard日志目录
-  checkpoint_dir: "./trained_models/outputs1110/checkpoints" # 检查点保存目录
+  output_dir: "./trained_models/outputs_close_dataEnhanced/results"        # 输出目录（方案A: 超强频域主导）
+  log_dir: "./trained_models/outputs_close_dataEnhanced/logs"              # TensorBoard日志目录
+  checkpoint_dir: "./trained_models/outputs_close_dataEnhanced/checkpoints" # 检查点保存目录
 
 # ========== 恢复训练 ==========
 resume:

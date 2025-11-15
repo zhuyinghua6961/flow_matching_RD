@@ -27,7 +27,7 @@
               </el-icon>
             </template>
           </el-table-column>
-          <el-table-column label="操作" align="center">
+          <el-table-column label="操作" align="center" width="200">
             <template #default="{ row }">
               <el-button-group>
                 <el-button 
@@ -43,6 +43,15 @@
                   @click="handleSwitch(row.name)"
                 >
                   切换
+                </el-button>
+                <el-button 
+                  v-if="row.is_loaded"
+                  size="small" 
+                  type="warning"
+                  @click="handleUnloadModel(row.name)"
+                  :loading="unloadingModel === row.name"
+                >
+                  卸载模型
                 </el-button>
                 <el-button 
                   size="small" 
@@ -304,6 +313,7 @@ import {
   uploadPlugin, 
   registerPlugin, 
   unregisterPlugin,
+  unloadModel,
   getPluginInfo 
 } from '@/api/model'
 
@@ -331,6 +341,7 @@ const showInfoDialog = ref(false)
 const currentPluginInfo = ref(null)
 const customParamsJson = ref('')
 const uploadMode = ref('path') // 'upload' 或 'path'
+const unloadingModel = ref(null) // 正在卸载模型的插件名称
 
 const registerForm = ref({
   plugin_file: null,
@@ -460,6 +471,34 @@ const handleUnregister = async (pluginName) => {
     }
   } catch {
     // 用户取消
+  }
+}
+
+const handleUnloadModel = async (pluginName) => {
+  try {
+    await ElMessageBox.confirm(
+      `确定要卸载插件 "${pluginName}" 的模型吗？\n卸载后将释放显存，但插件仍然保持注册状态。`,
+      '确认卸载模型',
+      {
+        confirmButtonText: '卸载',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+    
+    unloadingModel.value = pluginName
+    
+    const result = await unloadModel(pluginName)
+    if (result.success) {
+      ElMessage.success('模型卸载成功，显存已释放')
+      await modelStore.loadPluginList() // 刷新插件列表状态
+    } else {
+      ElMessage.error(result.message || '模型卸载失败')
+    }
+  } catch {
+    // 用户取消
+  } finally {
+    unloadingModel.value = null
   }
 }
 

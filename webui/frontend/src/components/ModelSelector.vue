@@ -106,9 +106,10 @@
             </el-descriptions-item>
           </el-descriptions>
 
-          <!-- 加载按钮 -->
+          <!-- 加载/卸载按钮 -->
           <div class="action-buttons">
             <el-button
+              v-if="!isCurrentModelLoaded"
               type="primary"
               size="large"
               @click="handleLoadModel"
@@ -116,6 +117,15 @@
               :disabled="!selectedModelId"
             >
               {{ loadModelLoading ? '加载中...' : '加载模型' }}
+            </el-button>
+            <el-button
+              v-if="isCurrentModelLoaded"
+              type="warning"
+              size="large"
+              @click="handleUnloadCurrentModel"
+              :loading="unloadModelLoading"
+            >
+              {{ unloadModelLoading ? '卸载中...' : '卸载当前模型' }}
             </el-button>
           </div>
         </div>
@@ -133,12 +143,16 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage, ElNotification } from 'element-plus'
+import { ElMessage, ElNotification, ElMessageBox } from 'element-plus'
 import { Box, Refresh, Loading } from '@element-plus/icons-vue'
+import { useModelStore } from '@/stores/model'
 import axios from 'axios'
 
 // 使用相对路径，会通过Vite代理转发到后端
 const API_BASE_URL = ''
+
+// Store
+const modelStore = useModelStore()
 
 // 状态
 const models = ref([])
@@ -146,6 +160,7 @@ const selectedModelId = ref(null)
 const loading = ref(false)
 const scanning = ref(false)
 const loadModelLoading = ref(false)
+const unloadModelLoading = ref(false)
 
 // 计算属性
 const selectedModel = computed(() => {
@@ -166,6 +181,11 @@ const modelGroups = computed(() => {
     groups[model.project].models.push(model)
   })
   return groups
+})
+
+// 检查当前是否有模型已加载
+const isCurrentModelLoaded = computed(() => {
+  return modelStore.isModelLoaded
 })
 
 // 获取已扫描的模型列表
@@ -226,6 +246,9 @@ async function handleLoadModel() {
     })
 
     if (response.data.success) {
+      // 立即更新modelStore状态
+      await modelStore.loadPluginList()
+      
       ElNotification({
         title: '加载成功',
         message: `模型 ${selectedModelId.value} 已成功加载`,
@@ -244,6 +267,40 @@ async function handleLoadModel() {
     ElMessage.error('加载模型失败: ' + (error.response?.data?.detail || error.message))
   } finally {
     loadModelLoading.value = false
+  }
+}
+
+// 卸载当前模型
+async function handleUnloadCurrentModel() {
+  try {
+    await ElMessageBox.confirm(
+      '确定要卸载当前模型吗？\n卸载后将释放显存，但插件仍然保持注册状态。',
+      '确认卸载模型',
+      {
+        confirmButtonText: '卸载',
+        cancelButtonText: '取消',
+        type: 'warning'
+      }
+    )
+    
+    unloadModelLoading.value = true
+    
+    const success = await modelStore.unloadCurrentModel()
+    if (success) {
+      // 立即更新状态
+      await modelStore.loadPluginList()
+      
+      ElNotification({
+        title: '卸载成功',
+        message: '模型已卸载，显存已释放',
+        type: 'success',
+        duration: 3000
+      })
+    }
+  } catch {
+    // 用户取消
+  } finally {
+    unloadModelLoading.value = false
   }
 }
 

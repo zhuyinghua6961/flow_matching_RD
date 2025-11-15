@@ -445,10 +445,17 @@ async def auto_load_model(request: Request, req_body: AutoLoadModelRequest):
         if not success:
             raise HTTPException(status_code=500, detail="模型注册失败")
         
-        # 生成插件名称
-        plugin_name = req_body.model_id.replace('/', '_').replace('.pth', '')
+        # 生成插件名称（与auto_register_from_config保持一致）
+        import hashlib
+        model_path = model_info['path']
+        path_hash = hashlib.md5(model_path.encode()).hexdigest()[:8]
+        plugin_name = f"{req_body.model_id.replace('/', '_').replace('.pth', '')}_{path_hash}"
+        logger.info(f"[AUTO_LOAD] 模型ID: {req_body.model_id}")
+        logger.info(f"[AUTO_LOAD] 模型路径: {model_path}")
+        logger.info(f"[AUTO_LOAD] 插件名称: {plugin_name}")
         
         # 加载模型
+        logger.info(f"[AUTO_LOAD] 开始加载模型到插件: {plugin_name}")
         load_success = model_manager.load_model(
             plugin_name=plugin_name,
             device=req_body.device
@@ -456,6 +463,11 @@ async def auto_load_model(request: Request, req_body: AutoLoadModelRequest):
         
         if not load_success:
             raise HTTPException(status_code=500, detail="模型加载失败")
+        
+        # 切换到新加载的插件
+        switch_success = model_manager.switch_plugin(plugin_name)
+        if not switch_success:
+            logger.warning(f"切换到插件 {plugin_name} 失败，但模型已加载")
         
         logger.info(f"自动加载模型成功: {req_body.model_id}")
         

@@ -167,8 +167,11 @@ async def infer_single_image(request: Request, req_body: InferenceRequest):
         if not input_path.exists():
             raise HTTPException(status_code=404, detail=f"输入文件不存在: {req_body.image_path}")
         
-        # 确定输出路径
-        output_filename = f"output_{input_path.stem}.png"
+        # 确定输出路径（添加时间戳避免文件覆盖）
+        import time
+        timestamp = int(time.time() * 1000)  # 毫秒级时间戳
+        current_plugin = model_manager.current_plugin or "unknown"
+        output_filename = f"output_{input_path.stem}_{current_plugin}_{timestamp}.png"
         output_path = OUTPUT_DIR / output_filename
         
         # 执行推理
@@ -183,6 +186,9 @@ async def infer_single_image(request: Request, req_body: InferenceRequest):
         # 如果成功，转换输出路径为相对路径（用于前端访问）
         if result['success'] and 'output_path' in result:
             result['output_url'] = f"/outputs/{output_filename}"
+            # 添加调试信息
+            logger.info(f"[INFERENCE] 推理完成，输出文件: {output_filename}")
+            logger.info(f"[INFERENCE] 访问URL: {result['output_url']}")
         
         return result
         

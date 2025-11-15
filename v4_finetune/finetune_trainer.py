@@ -1,7 +1,8 @@
 """
-V4 - 两阶段微调训练器
+V4 - 渐进式微调训练器
 阶段1：预训练Flow Matching基础模型（外部完成）
 阶段2：加载预训练模型，用GAN专门优化多普勒效应
+支持三阶段渐进式训练：生成器预热 → 温和对抗 → 正常对抗
 """
 import os
 from pathlib import Path
@@ -48,13 +49,14 @@ class EarlyStopping:
 
 class FineTuneTrainer:
     """
-    两阶段微调训练器
+    渐进式微调训练器
     
     核心理念：
     1. 加载预训练的Flow Matching模型（基础能力已具备）
     2. 冻结大部分参数（保护背景和整体结构）
     3. 只微调与多普勒相关的高频特征
     4. 用判别器专门指导多普勒效应的改进
+    5. 支持三阶段渐进式训练，避免判别器过早压制生成器
     """
     
     def __init__(self, config_path, pretrained_checkpoint):
@@ -83,6 +85,9 @@ class FineTuneTrainer:
         
         # 设置训练
         self.setup_training()
+        
+        # 初始化三阶段训练
+        self.setup_progressive_training()
         
         print("="*60)
         print("V4 微调训练器初始化完成")
@@ -236,14 +241,16 @@ class FineTuneTrainer:
     
     def setup_training(self):
         """设置训练参数"""
-        self.start_epoch = 0
+        self.start_epoch = 1  # 🔧 修改：epoch从1开始
         self.global_step = 0
         self.best_val_loss = float('inf')
         
-        # GAN训练参数
+        # GAN训练参数（初始化，可能会被三阶段训练覆盖）
         self.discriminator_update_freq = int(self.config['finetune'].get('discriminator_update_freq', 1))
         self.adversarial_weight = float(self.config['finetune'].get('adversarial_weight', 1.0))
         self.feature_matching_weight = float(self.config['finetune'].get('feature_matching_weight', 1.0))
+        self.gan_weight = float(self.config['finetune'].get('gan_weight', 0.3))
+        self.frequency_weight = float(self.config['loss'].get('frequency_weight', 1.5))
         
         # 梯度累积参数
         self.gradient_accumulation_steps = int(self.config['train'].get('gradient_accumulation_steps', 1))
@@ -265,8 +272,90 @@ class FineTuneTrainer:
         else:
             self.early_stopping = None
     
+    def setup_progressive_training(self):
+        """设置三阶段渐进式训练"""
+        self.progressive_config = self.config['finetune'].get('progressive_training', {})
+        self.progressive_enabled = self.progressive_config.get('enabled', False)
+        self.current_stage = None
+        self.current_stage_name = None
+        
+        # 保存原始配置（用于非渐进式训练）
+        self.original_gan_weight = float(self.config['finetune'].get('gan_weight', 0.3))
+        self.original_adversarial_weight = float(self.config['finetune'].get('adversarial_weight', 1.0))
+        self.original_feature_matching_weight = float(self.config['finetune'].get('feature_matching_weight', 1.0))
+        self.original_frequency_weight = float(self.config['loss'].get('frequency_weight', 1.5))
+        self.original_lr_discriminator = float(self.config['finetune'].get('lr_discriminator', 1e-4))
+        self.original_discriminator_update_freq = int(self.config['finetune'].get('discriminator_update_freq', 1))
+        
+        if self.progressive_enabled:
+            print(f"\n🚀 三阶段渐进式训练已启用")
+            print(f"  Stage 1: Epoch {self.progressive_config['stage1']['epochs'][0]}-{self.progressive_config['stage1']['epochs'][1]} - {self.progressive_config['stage1']['description']}")
+            print(f"  Stage 2: Epoch {self.progressive_config['stage2']['epochs'][0]}-{self.progressive_config['stage2']['epochs'][1]} - {self.progressive_config['stage2']['description']}")
+            print(f"  Stage 3: Epoch {self.progressive_config['stage3']['epochs'][0]}+ - {self.progressive_config['stage3']['description']}")
+        else:
+            print(f"\n📝 使用常规训练模式（三阶段训练已禁用）")
+    
+    def get_current_stage_config(self, current_epoch):
+        """根据当前epoch确定训练阶段并返回对应配置"""
+        if not self.progressive_enabled:
+            return None, None
+        
+        # 检查当前处于哪个阶段
+        for stage_name in ['stage1', 'stage2', 'stage3']:
+            stage_config = self.progressive_config[stage_name]
+            start_epoch, end_epoch = stage_config['epochs']
+            if start_epoch <= current_epoch <= end_epoch:
+                return stage_config, stage_name
+        
+        # 如果超出所有阶段范围，使用stage3
+        return self.progressive_config['stage3'], 'stage3'
+    
+    def apply_stage_config(self, stage_config, stage_name, current_epoch):
+        """应用当前阶段的配置参数"""
+        # 检查是否需要切换阶段
+        stage_changed = (self.current_stage_name != stage_name)
+        
+        if stage_changed:
+            print(f"\n🔄 切换到 {stage_name} (Epoch {current_epoch}): {stage_config.get('description', '')}")
+            
+            # 更新损失权重
+            self.gan_weight = float(stage_config.get('gan_weight', self.original_gan_weight))
+            self.adversarial_weight = float(stage_config.get('adversarial_weight', self.original_adversarial_weight))
+            self.feature_matching_weight = float(stage_config.get('feature_matching_weight', self.original_feature_matching_weight))
+            self.frequency_weight = float(stage_config.get('frequency_weight', self.original_frequency_weight))
+            
+            # 更新判别器学习率
+            new_lr_discriminator = float(stage_config.get('lr_discriminator', self.original_lr_discriminator))
+            for param_group in self.discriminator_optimizer.param_groups:
+                param_group['lr'] = new_lr_discriminator
+            
+            # 更新判别器更新频率
+            self.discriminator_update_freq = int(stage_config.get('discriminator_update_freq', self.original_discriminator_update_freq))
+            
+            # 记录参数变化
+            print(f"   GAN权重: {self.gan_weight}")
+            print(f"   对抗损失权重: {self.adversarial_weight}")
+            print(f"   特征匹配权重: {self.feature_matching_weight}")
+            print(f"   频域损失权重: {self.frequency_weight}")
+            print(f"   判别器学习率: {new_lr_discriminator}")
+            print(f"   判别器更新频率: {self.discriminator_update_freq}")
+            
+            # 更新当前阶段
+            self.current_stage = stage_config
+            self.current_stage_name = stage_name
+            
+            # 记录到TensorBoard
+            self.writer.add_scalar('Training/Stage', {'stage1': 1, 'stage2': 2, 'stage3': 3}[stage_name], current_epoch)
+            self.writer.add_scalar('Training/GAN_Weight', self.gan_weight, current_epoch)
+            self.writer.add_scalar('Training/Discriminator_LR', new_lr_discriminator, current_epoch)
+    
     def train_one_epoch(self, epoch, train_loader):
         """训练一个epoch（支持梯度累积）"""
+        # 🚀 三阶段训练：检查并应用当前阶段配置
+        stage_config, stage_name = self.get_current_stage_config(epoch)
+        if stage_config is not None:
+            self.apply_stage_config(stage_config, stage_name, epoch)
+        
         self.model.train()
         self.discriminator.train()
         
@@ -299,16 +388,17 @@ class FineTuneTrainer:
             
             # ============================================================
             # 阶段1：训练判别器（每N步更新一次，支持梯度累积）
+            # 🚀 三阶段训练：如果判别器学习率为0，跳过判别器训练
             # ============================================================
-            if batch_idx % self.discriminator_update_freq == 0:
-                # 生成假图像
+            current_d_lr = self.discriminator_optimizer.param_groups[0]['lr']
+            if batch_idx % self.discriminator_update_freq == 0 and current_d_lr > 0:
+                # 生成假图像（使用配置的ODE推理步数，提高生成质量）
                 with torch.no_grad():
-                    batch_size = sim_images.shape[0]
-                    t_mid = torch.ones(batch_size, device=self.device) * 0.5
-                    noise = torch.randn_like(real_images)
-                    x_mid = 0.5 * noise + 0.5 * real_images
-                    v_pred = self.model(x_mid, t_mid, sim_images)
-                    fake_images = x_mid + v_pred * 0.5
+                    fake_images = self.model.generate(
+                        sim_images,
+                        ode_steps=int(self.config['finetune']['ode_steps']),
+                        ode_method=self.config['finetune']['ode_method']
+                    )
                 
                 # 判别器损失
                 d_loss, d_info = doppler_adversarial_loss(
@@ -364,13 +454,12 @@ class FineTuneTrainer:
             # Flow Matching Loss
             loss_fm = self.model.compute_loss(sim_images, real_images)
             
-            # 获取预测
-            batch_size = sim_images.shape[0]
-            t_mid = torch.ones(batch_size, device=self.device) * 0.5
-            noise = torch.randn_like(real_images)
-            x_mid = 0.5 * noise + 0.5 * real_images
-            v_pred = self.model(x_mid, t_mid, sim_images)
-            predicted = x_mid + v_pred * 0.5
+            # 获取预测（使用配置的ODE推理步数，与判别器训练保持一致）
+            predicted = self.model.generate(
+                sim_images,
+                ode_steps=int(self.config['finetune']['ode_steps']),
+                ode_method=self.config['finetune']['ode_method']
+            )
             
             # 频域Loss（保持原有能力）
             loss_freq = torch.tensor(0.0, device=self.device)
@@ -387,11 +476,14 @@ class FineTuneTrainer:
                 self.discriminator, real_images, predicted
             )
             
-            # 总损失
+            # 总损失（使用动态权重，支持三阶段训练）
+            frequency_weight = getattr(self, 'frequency_weight', float(self.config['loss'].get('frequency_weight', 2.0)))
+            gan_weight = getattr(self, 'gan_weight', float(self.config['finetune']['gan_weight']))
+            
             loss_g = (
                 loss_fm +
-                float(self.config['loss'].get('frequency_weight', 2.0)) * loss_freq +
-                float(self.config['finetune']['gan_weight']) * (
+                frequency_weight * loss_freq +
+                gan_weight * (
                     self.adversarial_weight * loss_adv +
                     self.feature_matching_weight * loss_fm_gan
                 )
@@ -435,9 +527,16 @@ class FineTuneTrainer:
                 'FM': f"{loss_fm.item():.4f}",
                 'Adv': f"{loss_adv.item():.4f}",
             }
-            if batch_idx % self.discriminator_update_freq == 0:
+            # 🚀 三阶段训练：显示判别器状态
+            current_d_lr = self.discriminator_optimizer.param_groups[0]['lr']
+            if current_d_lr == 0:
+                postfix['D'] = "SKIP"  # 阶段1：判别器跳过
+                postfix['Stage'] = getattr(self, 'current_stage_name', 'N/A')
+            elif batch_idx % self.discriminator_update_freq == 0:
                 postfix['D'] = f"{d_loss.item():.4f}"
                 postfix['D_acc'] = f"{(d_info['real_acc'] + d_info['fake_acc'])/2:.2f}"
+                if hasattr(self, 'current_stage_name'):
+                    postfix['Stage'] = self.current_stage_name
             pbar.set_postfix(postfix)
             
             self.global_step += 1
@@ -479,13 +578,12 @@ class FineTuneTrainer:
             # Flow Matching Loss
             loss_fm = self.model.compute_loss(sim_images, real_images)
             
-            # 获取预测
-            batch_size = sim_images.shape[0]
-            t_mid = torch.ones(batch_size, device=self.device) * 0.5
-            noise = torch.randn_like(real_images)
-            x_mid = 0.5 * noise + 0.5 * real_images
-            v_pred = self.model(x_mid, t_mid, sim_images)
-            predicted = x_mid + v_pred * 0.5
+            # 获取预测（使用配置的ODE推理步数，与训练保持一致）
+            predicted = self.model.generate(
+                sim_images,
+                ode_steps=int(self.config['finetune']['ode_steps']),
+                ode_method=self.config['finetune']['ode_method']
+            )
             
             # 频域Loss
             loss_freq = torch.tensor(0.0, device=self.device)
@@ -550,26 +648,31 @@ class FineTuneTrainer:
                     old_ckpt.unlink()
                     print(f"  清理旧检查点: {old_ckpt.name}")
     
-    def save_final_model(self):
-        """保存最终模型（使用最佳模型的权重）"""
-        best_path = self.checkpoint_dir / "best_finetuned.pth"
+    def save_final_model(self, epoch):
+        """保存最终模型（训练停止时的当前模型状态）"""
         final_path = self.checkpoint_dir / "final_finetuned.pth"
         
-        if best_path.exists():
-            # 加载最佳模型
-            best_checkpoint = torch.load(best_path, map_location=self.device, weights_only=False)
-            # 保存为最终模型
-            torch.save(best_checkpoint, final_path)
-            print(f"✓ 保存最终模型: {final_path}")
-            print(f"  最终模型基于最佳epoch: {best_checkpoint['epoch']}")
-        else:
-            print("警告：最佳模型不存在，无法保存最终模型")
+        checkpoint = {
+            'epoch': epoch,
+            'global_step': self.global_step,
+            'model_state_dict': self.model.state_dict(),
+            'discriminator_state_dict': self.discriminator.state_dict(),
+            'generator_optimizer_state_dict': self.generator_optimizer.state_dict(),
+            'discriminator_optimizer_state_dict': self.discriminator_optimizer.state_dict(),
+            'generator_scheduler_state_dict': self.generator_scheduler.state_dict() if self.generator_scheduler else None,
+            'best_val_loss': self.best_val_loss,
+            'config': self.config
+        }
+        
+        torch.save(checkpoint, final_path)
+        print(f"✓ 保存最终模型 (Epoch {epoch}): {final_path}")
     
     def train(self, train_loader, val_loader, num_epochs):
         """主训练循环"""
         print("\n开始微调训练...")
         
-        for epoch in range(self.start_epoch, num_epochs):
+        # 🔧 修改：确保训练完整的num_epochs个epoch（从1到num_epochs）
+        for epoch in range(self.start_epoch, num_epochs + 1):
             # 训练
             train_loss = self.train_one_epoch(epoch, train_loader)
             
@@ -582,7 +685,7 @@ class FineTuneTrainer:
             if self.generator_scheduler:
                 self.generator_scheduler.step(val_loss)
                 current_lr = self.generator_optimizer.param_groups[0]['lr']
-                if epoch > 0:
+                if epoch > 1:  # 🔧 修改：epoch从1开始，所以第2个epoch才显示学习率变化
                     print(f"  当前学习率: {current_lr:.2e}")
             
             # 保存检查点
@@ -591,7 +694,8 @@ class FineTuneTrainer:
                 self.best_val_loss = val_loss
                 print(f"  ✓ 新的最佳模型！")
             
-            if (epoch + 1) % int(self.config['train']['save_interval']) == 0 or is_best:
+            # 🔧 修改：epoch从1开始，每save_interval个epoch保存一次
+            if epoch % int(self.config['train']['save_interval']) == 0 or is_best:
                 self.save_checkpoint(epoch, is_best)
             
             # 早停检查
@@ -610,7 +714,7 @@ class FineTuneTrainer:
                     print(f"\n早停触发！最佳Val Loss: {self.best_val_loss:.6f}")
                     print(f"早停计数器达到: {self.early_stopping.counter}/{self.early_stopping.patience}")
                     # 早停时保存最终模型
-                    self.save_final_model()
+                    self.save_final_model(epoch)
                     break
                 else:
                     # 显示当前计数器（0表示验证损失有改善，>0表示连续N轮未改善）
@@ -618,7 +722,7 @@ class FineTuneTrainer:
         else:
             # 正常训练完成，保存最终模型
             print("\n训练正常完成！")
-            self.save_final_model()
+            self.save_final_model(epoch)
         
         print(f"\n微调训练完成！")
         print(f"最佳Val Loss: {self.best_val_loss:.6f}")

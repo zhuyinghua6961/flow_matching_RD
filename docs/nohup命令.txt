@@ -8,4 +8,6 @@ nohup npm run dev > front.log 2>&1 &
 nohup python train_finetune.py --config config_finetune.yaml > train_finetune.log 2>&1 &
 
 
+nohup python train_wgan.py --config config_wgan.yaml > train_wgan.log 2>&1 &
+
 https://mirrors.aliyun.com/pypi/simple/
